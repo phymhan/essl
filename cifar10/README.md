@@ -1,6 +1,13 @@
 E-SSL: CIFAR-10
 ---------------------------------------------------------------
 
+- `main2.py`: cleaned up main.py with wandb logging and resuming
+- `utils_data2.py`: cleaned up utils_data.py
+
+## TODO:
+- [ ] multiview simclr training
+
+
 <p align="center">
   <img width="500" alt="cifar10" src="https://user-images.githubusercontent.com/19780421/147094896-0b1166d5-742a-4a87-bad0-9e04741256bc.png">
 </p>

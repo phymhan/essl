@@ -97,6 +97,7 @@ def main_worker(gpu, args):
     sampler = torch.utils.data.distributed.DistributedSampler(dataset, drop_last=True)
     assert args.batch_size % args.world_size == 0
     per_device_batch_size = args.batch_size // args.world_size
+    print(f"loader with batch_size={per_device_batch_size}")
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=per_device_batch_size, num_workers=args.workers,
         pin_memory=True, sampler=sampler)

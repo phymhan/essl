@@ -15,7 +15,10 @@ import torchvision
 import torchvision.transforms as T
 
 from resnet import resnet18
-from utils import knn_monitor, fix_seed
+from utils import knn_monitor, fix_seed, setup_wandb
+
+import pdb
+st = pdb.set_trace
 
 normalize = T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
 single_transform = T.Compose([T.ToTensor(), normalize])
@@ -47,6 +50,32 @@ class ContrastiveLearningTransform:
         ]
         return output
 
+class ContrastiveLearningTransform2:
+    def __init__(self):
+        transforms = [
+            T.RandomResizedCrop(size=32, scale=(0.2, 1.0)),
+            T.RandomHorizontalFlip(p=0.5),
+            T.RandomApply([T.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            T.RandomGrayscale(p=0.2)
+        ]
+        transforms_rotation = [
+            T.RandomResizedCrop(size=16, scale=(0.2, 1.0)),
+            T.RandomHorizontalFlip(p=0.5),
+            T.RandomApply([T.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            T.RandomGrayscale(p=0.2)
+        ]
+
+        self.transform = T.Compose(transforms)
+        self.transform_rotation = T.Compose(transforms_rotation)
+
+    def __call__(self, x):
+        output = [
+            single_transform(x),
+            single_transform(self.transform(x)),
+            single_transform(self.transform(x)),
+            single_transform(self.transform_rotation(x))
+        ]
+        return output
 
 def rotate_images(images):
     nimages = images.shape[0]
@@ -172,19 +201,21 @@ def knn_loop(encoder, train_loader, test_loader):
     return accuracy
 
 
-def ssl_loop(args, encoder=None):
+def ssl_loop(args, encoder=None, logger=None):
     if args.checkpoint_path:
         print('checkpoint provided => moving to evaluation')
         main_branch = Branch(args, encoder=encoder).cuda()
         saved_dict = torch.load(os.path.join(args.checkpoint_path))['state_dict']
         main_branch.load_state_dict(saved_dict)
-        file_to_update = open(os.path.join(args.path_dir, 'train_and_eval.log'), 'a')
+        file_to_update = open(os.path.join(args.path_dir, 'train_and_eval.log.txt'), 'a')
         file_to_update.write(f'evaluating {args.checkpoint_path}\n')
         return main_branch.encoder, file_to_update
 
+    total_step = 0
+
     # logging
     os.makedirs(args.path_dir, exist_ok=True)
-    file_to_update = open(os.path.join(args.path_dir, 'train_and_eval.log'), 'w')
+    file_to_update = open(os.path.join(args.path_dir, 'train_and_eval.log.txt'), 'w')
 
     # dataset
     train_loader = torch.utils.data.DataLoader(
@@ -329,6 +360,16 @@ def ssl_loop(args, encoder=None):
             file_to_update.write(line_to_print + '\n')
             file_to_update.flush()
         print(line_to_print)
+        if logger is not None:
+            logger.log(
+                {
+                    'epoch': e,
+                    'knn_acc': knn_acc,
+                    'loss': loss.item(),
+                    'lr': lr,
+                    'time_elapsed': time.time() - start
+                }
+            )
 
         if e % args.save_every == 0:
             torch.save(dict(epoch=e, state_dict=main_branch.state_dict()),
@@ -337,7 +378,7 @@ def ssl_loop(args, encoder=None):
     return main_branch.encoder, file_to_update
 
 
-def eval_loop(encoder, file_to_update, ind=None):
+def eval_loop(encoder, file_to_update, ind=None, logger=None):
     # dataset
     train_transform = T.Compose([
         T.RandomResizedCrop(32, interpolation=T.InterpolationMode.BICUBIC),
@@ -442,7 +483,8 @@ def eval_loop(encoder, file_to_update, ind=None):
 
 def main(args):
     fix_seed(args.seed)
-    encoder, file_to_update = ssl_loop(args)
+    logger = setup_wandb(args) if args.use_wandb else None
+    encoder, file_to_update = ssl_loop(args, logger=logger)
     accs = []
     for i in range(5):
         accs.append(eval_loop(copy.deepcopy(encoder), file_to_update, i))
@@ -450,6 +492,10 @@ def main(args):
     file_to_update.write(line_to_print + '\n')
     file_to_update.flush()
     print(line_to_print)
+    if logger is not None:
+        import wandb
+        tbl = wandb.Table(data=[accs + [np.mean(accs)]], columns=[f'seed={i}' for i in range(5)] + ['mean'])
+        logger.log({'linear_probe': tbl})
 
 
 if __name__ == '__main__':
@@ -464,11 +510,17 @@ if __name__ == '__main__':
     parser.add_argument('--save_every', default=50, type=int)
     parser.add_argument('--warmup_epochs', default=10, type=int)
     parser.add_argument('--path_dir', default='../experiment', type=str)
+    parser.add_argument('--wandb_project', default='simclr-cifar10', type=str)
     parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--lmbd', default=0.0, type=float)
     parser.add_argument('--num_workers', default=16, type=int)
     parser.add_argument('--checkpoint_path', default=None, type=str)
     parser.add_argument('--fp16', action='store_true')
+    parser.add_argument('--use_wandb', action='store_true')
+    parser.add_argument('--n_views', default=2, type=int)
+    parser.add_argument('--include_original', action='store_true')
     args = parser.parse_args()
+
+    args.log_dir = args.path_dir  # TODO
 
     main(args)
