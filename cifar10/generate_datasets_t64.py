@@ -79,6 +79,7 @@ if __name__ == '__main__':
     parser.add_argument('--part', type=int, default=None)
     parser.add_argument('--clamp', action='store_true')
     parser.add_argument('--merge', action='store_true')
+    parser.add_argument('--to_uint8', action='store_true')
     parser.add_argument('--add_noise', action='store_true')
     parser.add_argument('--start_from_orig', action='store_true')
     parser.add_argument('--eval', action='store_true')
@@ -97,6 +98,19 @@ if __name__ == '__main__':
         views = torch.cat(views, dim=1)  # NOTE: batch is second dim
         with open(args.dest_data_path, 'wb') as f:
             pickle.dump({'seed': args.seed, 'n_part': args.n_part, 'n_views': args.n, 'views': views}, f)
+        exit(0)
+    
+    if args.to_uint8:
+        dest_data_path = args.dest_data_path.replace('.pkl', '_uint8.pkl')
+        with open(args.dest_data_path, 'rb') as f:
+            data = pickle.load(f)
+        views = data['views']
+        assert views.shape[2] == 3
+        views = views.permute(0, 1, 3, 4, 2)  # n b 3 h w -> n b h w 3
+        views = ((views + 1) * 127.5).round().to(torch.uint8).numpy()
+        data['views'] = views
+        with open(dest_data_path, 'wb') as f:
+            pickle.dump(data, f)
         exit(0)
 
     # name = args.name

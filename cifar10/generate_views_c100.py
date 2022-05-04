@@ -45,6 +45,23 @@ class ResNetWrapper(nn.Module):
         x = self.model.avgpool(x)
         return x
 
+def get_transform_list(which_transform, size=32):
+    if isinstance(which_transform, str):
+        which_transform = which_transform.replace(',', '+').split('+')
+    transform_list = []
+    for t in which_transform:
+        t = t.lower()
+        if t == 'resizedcrop':
+            transform_list.append(T.RandomResizedCrop(size=size, scale=(0.2, 1.0)))
+        elif t == 'resizedcrophalf':
+            transform_list.append(T.RandomResizedCrop(size=size//2, scale=(0.2, 1.0)))
+        elif t == 'horizontalflip':
+            transform_list.append(T.RandomHorizontalFlip(p=0.5))
+        elif t == 'colorjitter':
+            transform_list.append(T.RandomApply([T.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8))
+        elif t == 'grayscale':
+            transform_list.append(T.RandomGrayscale(p=0.2))
+    return transform_list
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -80,6 +97,9 @@ if __name__ == '__main__':
     parser.add_argument('--g_ckpt', type=str, default='/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0423_gan_c100/weight/220000.pt')
     parser.add_argument('--e_ckpt', type=str, default='/research/cbim/medical/lh599/active/stylegan2-encoder-pytorch/checkpoint_c100/encoder_980000.pt')
     parser.add_argument('--n_latent', type=int, default=8)
+    parser.add_argument('--invert', action='store_true')
+    parser.add_argument("--augment_leaking", action='store_true', help="apply non-differentiable, 'leaking' augmentation")
+    parser.add_argument("--which_transform", type=str, default='resizedcrop+horizontalflip+colorjitter+grayscale')
 
     args = parser.parse_args()
 
@@ -120,6 +140,10 @@ if __name__ == '__main__':
     log_root = Path(args.log_root)
     log_dir = log_root / name
     os.makedirs(log_dir, exist_ok=True)
+
+    from utils import print_args
+    args.log_dir = log_dir
+    print_args(parser, args)
 
     USE_HTML = True
     log_web_dir = log_dir / 'web'
@@ -240,6 +264,35 @@ if __name__ == '__main__':
         #                         randomize_noise=False)
 
     z1 = z.detach().clone()
+
+    if args.augment_leaking:
+        vgg_loss = VGGLoss(device)
+        transforms_leaking = get_transform_list(args.which_transform, args.image_size)
+        transforms_leaking = [transforms.Normalize([-1, -1, -1], [2, 2, 2])] + \
+            transforms_leaking + [transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])]
+        transforms_leaking = transforms.Compose(transforms_leaking)
+        imgs_leak = torch.stack([transforms_leaking(x) for x in imgs])
+        imgs_leaks = torch.cat([img for img in imgs_leak], dim=1)
+
+        z = z1.detach().clone()
+        z.requires_grad = True
+        optimizer = torch.optim.Adam([z], lr=args.lr_inv)
+        for step in range(args.iters_inv):
+            imgs_gen, _ = generator([z], 
+                                    input_is_latent=True, 
+                                    truncation=truncation,
+                                    truncation_latent=trunc, 
+                                    randomize_noise=False)
+            loss = F.mse_loss(imgs_gen, imgs_leak) + vgg_loss(imgs_gen, imgs_leak)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            if step % 100 == 0:
+                imgs_fakes = torch.cat([img_gen for img_gen in imgs_gen], dim=1)
+                imsave(log_dir / f'leak_step{step}.png', tensor2image(torch.cat([imgs_leaks, imgs_fakes], dim=2)))
+        imgs_fakes = torch.cat([img_gen for img_gen in imgs_gen], dim=1)
+        imsave(log_dir / f'leak_{step+1}.png', tensor2image(torch.cat([imgs_leaks, imgs_fakes], dim=2)))
+        exit(0)
 
     # input transform
     encoder_input_transform = T.Compose(
