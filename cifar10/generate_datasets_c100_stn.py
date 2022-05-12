@@ -24,6 +24,55 @@ from einops import rearrange
 import pdb
 st = pdb.set_trace
 
+SCALE_LOW = np.sqrt(0.2)
+SCALE_HIGH = 1
+
+def stn_crop(theta, imgs, constraint='clamp'):
+    # if constraint == 'clamp':
+    small = 0.001
+    theta_clamp = theta.detach().clone()
+    theta_clamp[:,0] = torch.clamp(theta_clamp[:,0], SCALE_LOW, SCALE_HIGH)
+    theta_clamp[:,4] = torch.clamp(theta_clamp[:,4], SCALE_LOW, SCALE_HIGH)
+    scale_x = theta_clamp[:,0]
+    scale_y = theta_clamp[:,4]
+    margin_x = F.relu(1 - scale_x)
+    margin_y = F.relu(1 - scale_y)
+    theta_clamp[:,2] = torch.clamp(theta_clamp[:,2], -margin_x, margin_x)
+    theta_clamp[:,5] = torch.clamp(theta_clamp[:,5], -margin_y, margin_y)
+    theta_clamp[:,1] = torch.clamp(theta_clamp[:,1], -small, small)
+    theta_clamp[:,3] = torch.clamp(theta_clamp[:,1], -small, small)
+
+    theta = theta + (theta_clamp - theta).detach()
+
+    grid = F.affine_grid(theta.view(-1, 2, 3), imgs.size())
+    imgs_gen = F.grid_sample(imgs, grid)
+
+    return imgs_gen
+
+class GanStnWrapper(nn.Module):
+    def __init__(self, generator, truncation=0.7, trunc=None, stn_type='crop', stn_grad_scale=1):
+        super().__init__()
+        self.generator = generator
+        self.truncation = truncation
+        self.trunc = trunc
+        self.stn_type = stn_type
+    
+    def forward(self, w, theta):
+        x, _ = self.generator(
+            [w],
+            input_is_latent=True,
+            truncation=self.truncation,
+            truncation_latent=self.trunc,
+            randomize_noise=False
+        )
+        if self.stn_type == 'crop':
+            x_ = stn_crop(theta, x)
+        elif self.stn_type == 'affine':
+            raise NotImplementedError
+        else:
+            raise NotImplementedError
+        return x_
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -63,9 +112,8 @@ if __name__ == '__main__':
     parser.add_argument('--g_ckpt', type=str, default='/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0423_gan_c100/weight/220000.pt')
     parser.add_argument('--model_path', type=str, default='../../SupContrast/logs/0428_c100_bs=512_base/weights/last.pth')
     parser.add_argument('--tol', type=float, default=1e-3)
-    parser.add_argument('--latent_dim', type=int, default=512)
-    parser.add_argument('--uniform_noise', action='store_true')
-    parser.add_argument('--n_latent', type=int, default=8)
+    parser.add_argument('--stn_type', type=str, default='crop')
+    parser.add_argument("--stn_grad_scale", type=float, default=1)
     args = parser.parse_args()
 
     # utils.fix_seed(args.seed)
@@ -94,27 +142,14 @@ if __name__ == '__main__':
     g_ckpt = torch.load(args.g_ckpt, map_location=device)
 
     latent_dim = g_ckpt['args'].latent
-    assert latent_dim == args.latent_dim
 
     generator = Generator(image_size, latent_dim, 8).to(device)
     generator.load_state_dict(g_ckpt["g_ema"], strict=False)
     generator.eval()
     print('[generator loaded]')
 
-    # truncation = args.truncation
-    # trunc = generator.mean_latent(4096).detach().clone()
-    if args.uniform_noise:
-        truncation = 1
-        trunc = None
-        input_is_latent = False
-        n_latent = 1
-        latent_normalize = partial(F.normalize, p=2, dim=-1)
-    else:
-        truncation = args.truncation
-        trunc = generator.mean_latent(4096).detach().clone()
-        input_is_latent = True
-        n_latent = args.n_latent
-        latent_normalize = lambda x: x
+    truncation = args.truncation
+    trunc = generator.mean_latent(4096).detach().clone()
 
     batch_size = args.batch_size
 
@@ -181,6 +216,8 @@ if __name__ == '__main__':
     views_image = []
     views_latent = []
 
+    generator_stn = GanStnWrapper(generator, truncation, trunc)
+
     index = np.arange(len(data['labels']))
     if args.part is not None:
         part_size = int(np.ceil(len(index) / args.n_part))
@@ -195,7 +232,6 @@ if __name__ == '__main__':
         z1 = latents[inds].clone()
         imgs = imgs.to(device)
         z1 = z1.to(device)
-        z1 = latent_normalize(z1)
 
         with torch.no_grad():
             imgs_rec, _ = generator([z1],
@@ -217,22 +253,38 @@ if __name__ == '__main__':
         if not args.add_noise:
             z_noise[::n, ...] = 0  # make sure the first one is accurate
         z = z + z_noise
-
         z.requires_grad = True
+
+        # ---------- stn ----------
+        theta = torch.zeros(z1.shape[0], 6, device=device).repeat_interleave(n, dim=0)
+        theta[:,0] = 1
+        theta[:,4] = 1
+        theta_noise = args.init_noise_scale * torch.randn_like(theta)  # [b*n, 6]
+        theta_noise[::n, ...] = 0  # make sure the first one is accurate
+        theta = theta + theta_noise
+        theta.requires_grad = True
+        # params = itertools.chain(params, [theta])
+        params = [
+            {'params': [z]},
+            {'params': [theta], 'lr': args.stn_grad_scale * args.lr},
+        ]
+        # ---------- stn ----------
+
         if args.optimizer == 'adam':
-            optimizer = torch.optim.Adam([z], lr=args.lr)
+            optimizer = torch.optim.Adam(params, lr=args.lr)
         elif args.optimizer == 'sgd':
-            optimizer = torch.optim.SGD([z], lr=args.lr)
+            optimizer = torch.optim.SGD(params, lr=args.lr)
         elif args.optimizer == 'lbfgs':
-            optimizer = torch.optim.LBFGS([z], max_iter=500)  # TODO: max_iter
+            optimizer = torch.optim.LBFGS(params, max_iter=500)  # TODO: max_iter
 
         done = False
         for step in range(args.iters):
-            imgs_gen, _ = generator([latent_normalize(z)],
-                                    input_is_latent=True, 
-                                    truncation=truncation,
-                                    truncation_latent=trunc, 
-                                    randomize_noise=False)
+            # imgs_gen, _ = generator([z],
+            #                         input_is_latent=True, 
+            #                         truncation=truncation,
+            #                         truncation_latent=trunc, 
+            #                         randomize_noise=False)
+            imgs_gen = generator_stn(z, theta)
             if args.clamp:
                 imgs_gen = torch.clamp(imgs_gen, -1, 1)
             h_gen = model(encoder_input_transform(imgs_gen))
@@ -273,18 +325,16 @@ if __name__ == '__main__':
         
         # get samples
         with torch.no_grad():
-            imgs_gen, _ = generator([latent_normalize(z)],
-                                    input_is_latent=True,
-                                    truncation=truncation,
-                                    truncation_latent=trunc,
-                                    randomize_noise=False)  # after the update
+            # imgs_gen, _ = generator([z],
+            #                         input_is_latent=True,
+            #                         truncation=truncation,
+            #                         truncation_latent=trunc,
+            #                         randomize_noise=False)  # after the update
+            imgs_gen = generator_stn(z, theta)
             if args.clamp:
                 imgs_gen = torch.clamp(imgs_gen, -1, 1)
         imgs_gen = imgs_gen.view(bsz, n, 3, image_size, image_size)
-        if n_latent == 1:
-            z = rearrange(z, '(b n) d -> b n d', b = bsz, n = n)
-        else:
-            z = rearrange(z, '(b n) m d -> b n m d', b = bsz, n = n)
+        z = rearrange(z, '(b n) m d -> b n m d', b = bsz, n = n)
         views_latent.append(z.detach().cpu().data)
         views_image.append(imgs_gen.detach().cpu().data)
 

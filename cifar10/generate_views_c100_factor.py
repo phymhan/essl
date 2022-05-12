@@ -63,30 +63,33 @@ def get_transform_list(which_transform, size=32):
             transform_list.append(T.RandomGrayscale(p=0.2))
     return transform_list
 
+def project_latent(A, dz):
+    return (A @ dz.unsqueeze(3)).squeeze(3)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=123)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--image_size', type=int, default=32)
     parser.add_argument('--truncation', type=float, default=0.7)
     parser.add_argument('--iters_inv', type=int, default=1000)
-    parser.add_argument('--iters', type=int, default=4000)
+    parser.add_argument('--iters', type=int, default=1000)
     parser.add_argument('--lr_inv', type=float, default=0.01)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd', 'lbfgs'])
     parser.add_argument('--beta1', type=float, default=0.5)
     parser.add_argument('--beta2', type=float, default=0.999)
-    parser.add_argument('--log_root', type=str, default='logs_new')
+    parser.add_argument('--log_root', type=str, default='logs_view_c100')
     parser.add_argument('--name', type=str, default='test')
     parser.add_argument('--model_dir', type=str, default='checkpoint')
     parser.add_argument('--data_root', type=str, default='../data')
     parser.add_argument('--load_model', type=str, default='simclr')
     parser.add_argument('--eps1', type=float, default=0.5)
     parser.add_argument('--eps2', type=float, default=1)
-    parser.add_argument('--init_noise_scale', type=float, default=0.001)
+    parser.add_argument('--init_noise_scale', type=float, default=0.02)
     parser.add_argument('--p', type=int, default=2)
     parser.add_argument('--n', type=int, default=8)
-    parser.add_argument('--save_every', type=int, default=100)
+    parser.add_argument('--save_every', type=int, default=50)
     parser.add_argument('--lam2', type=float, default=0, help='weight of distance regularization')
     parser.add_argument('--no_proj', action='store_true')
     parser.add_argument('--objective', type=str, default='norm', choices=['norm', 'cosine'])
@@ -94,15 +97,20 @@ if __name__ == '__main__':
     parser.add_argument('--method', type=str, default='gd', choices=['gd', 'fgsm', 'vat'])
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--clamp', action='store_true')
-    parser.add_argument('--g_ckpt', type=str, default='../pretrained/stylegan2-c10_g.pt')
-    parser.add_argument('--e_ckpt', type=str, default='../pretrained/stylegan2-c10_e.pt')
-    parser.add_argument("--augment_leaking", action='store_true', help="apply non-differentiable, 'leaking' augmentation")
+    parser.add_argument('--g_ckpt', type=str, default='/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0503_gan_c100_leak_2/weight/300000.pt')
+    parser.add_argument('--e_ckpt', type=str, default=None)
     parser.add_argument('--n_latent', type=int, default=8)
+    parser.add_argument('--invert', action='store_true')
+    parser.add_argument("--augment_leaking", action='store_true', help="apply non-differentiable, 'leaking' augmentation")
     parser.add_argument("--which_transform", type=str, default='resizedcrop+horizontalflip+colorjitter+grayscale')
-    parser.add_argument("--start_from_recon", action='store_true')
-    parser.add_argument("--cache_prefix", type=str, default='')
-    parser.add_argument('--latent_dim', type=int, default=512)
-    parser.add_argument('--uniform_noise', action='store_true')
+
+    parser.add_argument(
+        "--factor",
+        type=str,
+        default=None,
+        help="name of the closed form factorization result factor file",
+    )
+    parser.add_argument('--lam_l1', type=float, default=0, help='l1 reg on dz')
 
     args = parser.parse_args()
 
@@ -111,6 +119,10 @@ if __name__ == '__main__':
     device = 'cuda'
     image_size = args.image_size
     tol = 1e-5
+    args.clamp = True
+
+    eigvec = torch.load(args.factor)["eigvec"].to(device)
+    print(f"factor loaded, shape: {eigvec.shape}")
 
     batch_size = args.batch_size
 
@@ -130,7 +142,7 @@ if __name__ == '__main__':
             data = pickle.load(f)
         imgs = data['imgs']
     else:
-        dataset = datasets.CIFAR100(root=args.data_root, download=True, transform=transform)
+        dataset = datasets.CIFAR10(root=args.data_root, download=True, transform=transform)
         loader = iter(torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True))
         imgs, _ = next(loader)
         with open(cache, 'wb') as f:
@@ -143,6 +155,10 @@ if __name__ == '__main__':
     log_root = Path(args.log_root)
     log_dir = log_root / name
     os.makedirs(log_dir, exist_ok=True)
+
+    from utils import print_args
+    args.log_dir = log_dir
+    print_args(parser, args)
 
     USE_HTML = True
     log_web_dir = log_dir / 'web'
@@ -162,7 +178,6 @@ if __name__ == '__main__':
     print('[generator loaded]')
 
     if args.e_ckpt:
-        # e_model_path = '../pretrained/stylegan2-c10_e.pt'
         e_ckpt = torch.load(args.e_ckpt, map_location=device)
 
         encoder = Encoder(image_size, latent_dim).to(device)
@@ -175,30 +190,6 @@ if __name__ == '__main__':
 
     truncation = args.truncation
     trunc = generator.mean_latent(4096).detach().clone()
-
-    # with torch.no_grad():
-    #     latent = generator.get_latent(torch.randn(8*8, latent_dim, device=device))
-    #     imgs_gen, _ = generator([latent],
-    #                             truncation=truncation,
-    #                             truncation_latent=trunc,
-    #                             input_is_latent=True,
-    #                             randomize_noise=True)
-
-    #     result = []
-    #     for row in imgs_gen.chunk(8, dim=0):
-    #         result.append(torch.cat([img for img in row], dim=2))
-    #     result = torch.cat(result, dim=1)
-    #     print('generated samples:')
-    #     imsave(log_dir / 'gen_samples.png', tensor2image(result))
-
-    # Domain-guided encoder
-    # In-Domain Images
-
-    # dataset = datasets.CIFAR10(root=args.data_root, download=True, transform=transform)
-    # loader = iter(torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True))
-
-    # imgs, _ = next(loader)
-    # imgs = imgs.to(device)
 
     imgs_real = torch.cat([img for img in imgs], dim=1)
 
@@ -256,11 +247,6 @@ if __name__ == '__main__':
         z = data['z']
         z = z.to(device)
         print('[loaded z]')
-        # imgs_gen, _ = generator([z], 
-        #                         input_is_latent=True, 
-        #                         truncation=truncation,
-        #                         truncation_latent=trunc, 
-        #                         randomize_noise=False)
 
     z1 = z.detach().clone()
 
@@ -297,40 +283,26 @@ if __name__ == '__main__':
     encoder_input_transform = T.Compose(
         [
             T.Normalize([-1, -1, -1], [2, 2, 2]),  # to [0, 1]
-            T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
+            T.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
         ]
     )
     
     # Define SimCLR encoder
     if args.no_proj:
-        if args.objective == 'norm':
-            normalize = lambda x: x
-        elif args.objective == 'cosine':
-            normalize = partial(F.normalize, dim=1)
-        prefix = 'noproj'
-        from resnet import resnet18
-        model = resnet18(pretrained=False, num_classes=10)
-        checkpoint = torch.load('../pretrained/simclr-cifar10-resnet18-800ep-1.pth')
-        state_dict = checkpoint['state_dict']
-        for k in list(state_dict.keys()):
-            if k.startswith('encoder.'):
-                if k.startswith('encoder') and not k.startswith('encoder.fc'):
-                    # remove prefix
-                    state_dict[k[len("encoder."):]] = state_dict[k]
-            del state_dict[k]
-        log = model.load_state_dict(state_dict, strict=True)
-        # assert log.missing_keys == ['fc.weight', 'fc.bias']
-        # model = ResNetWrapper(model).to(device)
-        model.to(device)
+        raise NotImplementedError
     else:
-        from main import Branch
         normalize = partial(F.normalize, dim=1)
-        prefix = 'proj'
-        args_simclr = Config(dim_proj='2048,2048', dim_pred=512, loss='simclr')
-        model = Branch(args_simclr).to(device)
-        saved_dict = torch.load('../pretrained/simclr-cifar10-resnet18-800ep-1.pth')['state_dict']
-        model.load_state_dict(saved_dict, strict=True)
-    
+        from resnet_big import SupConResNet
+        model = SupConResNet(name='resnet50')
+        state_dict = torch.load('../../SupContrast/logs/0428_c100_bs=512_base/weights/last.pth', map_location='cpu')['model']
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            k = k.replace("module.", "")
+            new_state_dict[k] = v
+        state_dict = new_state_dict
+        model.load_state_dict(state_dict, strict=True)
+        model = model.to(device)
+
     if args.eval:
         print('eval mode')
         model.eval()
@@ -340,12 +312,15 @@ if __name__ == '__main__':
     p = args.p
     n = args.n
 
-    z = z1.detach().clone()
-    z = z.repeat_interleave(n, dim=0)
+    # ============================
 
-    z_noise = args.init_noise_scale * torch.randn_like(z)  # [b*n, L, D]
+    z0 = z1.detach().clone().repeat_interleave(n, dim=0)
+
+    dz = torch.zeros_like(z0)
+
+    z_noise = args.init_noise_scale * torch.randn_like(dz)  # [b*n, L, D]
     z_noise[::n, ...] = 0  # make sure the first one is accurate
-    z = z + z_noise
+    dz = dz + z_noise
 
     imgs_rep = imgs.repeat_interleave(n, dim=0)
 
@@ -359,18 +334,18 @@ if __name__ == '__main__':
     imgs_recon = torch.cat([img_rec for img_rec in imgs_rec], dim=1)
     imgs_blank = torch.ones_like(imgs_recon)[:,:,:8]
 
-    z.requires_grad = True
+    dz.requires_grad = True
     if args.optimizer == 'adam':
-        optimizer = torch.optim.Adam([z], lr=args.lr)
+        optimizer = torch.optim.Adam([dz], lr=args.lr)
     elif args.optimizer == 'sgd':
-        optimizer = torch.optim.SGD([z], lr=args.lr)
+        optimizer = torch.optim.SGD([dz], lr=args.lr)
     elif args.optimizer == 'lbfgs':
-        optimizer = torch.optim.LBFGS([z], max_iter=500)  # TODO: max_iter
+        optimizer = torch.optim.LBFGS([dz], max_iter=500)  # TODO: max_iter
 
     toggle_grad(model, False)
     toggle_grad(generator, False)
 
-    # h_img = model(imgs_rep)  # precompute
+    # NOTE: !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     h_img = model(encoder_input_transform(imgs_rec).repeat_interleave(n, dim=0))  # start from the reconstructed images
     h_img = normalize(h_img.squeeze()).detach()
 
@@ -378,7 +353,7 @@ if __name__ == '__main__':
     print('generating views...')
     done = False
     for step in range(args.iters):
-        imgs_gen, _ = generator([z],
+        imgs_gen, _ = generator([z0 + project_latent(eigvec, dz)],
                                 input_is_latent=True, 
                                 truncation=truncation,
                                 truncation_latent=trunc, 
@@ -404,6 +379,9 @@ if __name__ == '__main__':
             elif args.objective == 'cosine':
                 diff = F.relu(torch.sum(h_gen * h_img, dim=1) - eps1)
             loss = torch.mean(diff) + args.lam2 * loss_reg
+        
+        if args.lam_l1 > 0:
+            loss += args.lam_l1 * torch.mean(torch.abs(dz))
 
         if args.method == 'gd':
             if loss.item() > tol:
@@ -425,7 +403,7 @@ if __name__ == '__main__':
             losses.append(torch.sum(h_gen * h_img, dim=1).mean().item())
 
         if done or step == 0 or step == args.iters - 1 or (step + 1) % args.save_every == 0:
-            imgs_gen, _ = generator([z],
+            imgs_gen, _ = generator([z0 + project_latent(eigvec, dz)],
                                     input_is_latent=True,
                                     truncation=truncation,
                                     truncation_latent=trunc,
@@ -439,8 +417,6 @@ if __name__ == '__main__':
                 print(f'step: {step+1}, loss: {loss.item()}, norm: {torch.norm(h_gen - h_img, dim=1, p=p).mean().item()}, pdist: {pdist.mean().item()}')
             elif args.objective == 'cosine':
                 print(f'step: {step+1}, loss: {loss.item()}, cos: {torch.sum(h_gen * h_img, dim=1).mean().item()}, pdist: {pdist.mean().item()}')
-            # st()
-            # imsave(log_dir / 'debug_clamp.png', tensor2image(torch.cat([xx for xx in torch.clamp(imgs_gen[32:40,...], -1, 1)], dim=2)))
 
             imgs_gen = imgs_gen.view(batch_size, n, 3, image_size, image_size)
             imgs_fakes = []

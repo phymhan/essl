@@ -54,20 +54,23 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--image_size', type=int, default=32)
     parser.add_argument('--truncation', type=float, default=0.7)
-    parser.add_argument('--iters_inv', type=int, default=500)
+    parser.add_argument('--iters_inv', type=int, default=1000)
     parser.add_argument('--iters', type=int, default=1000)
     parser.add_argument('--lr_inv', type=float, default=0.01)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd', 'lbfgs'])
     parser.add_argument('--data_root', type=str, default='../data')
-    # parser.add_argument('--data_dest_root', type=str, default='data_c100/cifar100_gen')
     parser.add_argument('--data_path', type=str, default='data_c100/c100_data.pkl')
     parser.add_argument('--latent_path', type=str, default='data_c100/c100_latent.pkl')
-    parser.add_argument('--load_model', type=str, default='simclr')
     parser.add_argument('--n_part', type=int, default=None)
     parser.add_argument('--part', type=int, default=None)
     parser.add_argument('--merge', action='store_true')
     parser.add_argument('--verify', action='store_true')
+    parser.add_argument('--g_ckpt', type=str, default='/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0423_gan_c100/weight/220000.pt')
+    parser.add_argument('--e_ckpt', type=str, default='/research/cbim/medical/lh599/active/stylegan2-encoder-pytorch/checkpoint_c100/encoder_980000.pt')
+    parser.add_argument('--n_latent', type=int, default=8)
+    parser.add_argument('--latent_dim', type=int, default=512)
+    parser.add_argument('--uniform_noise', action='store_true')
     args = parser.parse_args()
 
     if args.merge:
@@ -87,8 +90,8 @@ if __name__ == '__main__':
     image_size = args.image_size
     # tol = 1e-3
 
-    g_model_path = '/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0423_gan_c100/weight/220000.pt'
-    g_ckpt = torch.load(g_model_path, map_location=device)
+    # g_model_path = '/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0423_gan_c100/weight/220000.pt'
+    g_ckpt = torch.load(args.g_ckpt, map_location=device)
 
     latent_dim = g_ckpt['args'].latent
 
@@ -97,16 +100,31 @@ if __name__ == '__main__':
     generator.eval()
     print('[generator loaded]')
 
-    e_model_path = '/research/cbim/medical/lh599/active/stylegan2-encoder-pytorch/checkpoint_c100/encoder_980000.pt'
-    e_ckpt = torch.load(e_model_path, map_location=device)
+    # e_model_path = '/research/cbim/medical/lh599/active/stylegan2-encoder-pytorch/checkpoint_c100/encoder_980000.pt'
+    if args.e_ckpt is not None and os.path.exists(args.e_ckpt):
+        e_ckpt = torch.load(args.e_ckpt, map_location=device)
+        encoder = Encoder(image_size, latent_dim).to(device)
+        encoder.load_state_dict(e_ckpt['e'])
+        encoder.eval()
+        print('[encoder loaded]')
+    else:
+        encoder = None
+        print('[no encoder]')
+    
+    assert latent_dim == args.latent_dim
+    if args.uniform_noise:
+        truncation = 1
+        trunc = None
+        input_is_latent = False
+        n_latent = 1
+        latent_normalize = partial(F.normalize, p=2, dim=-1)
+    else:
+        truncation = args.truncation
+        trunc = generator.mean_latent(4096).detach().clone()
+        input_is_latent = True
+        n_latent = args.n_latent
+        latent_normalize = lambda x: x
 
-    encoder = Encoder(image_size, latent_dim).to(device)
-    encoder.load_state_dict(e_ckpt['e'])
-    encoder.eval()
-    print('[encoder loaded]')
-
-    truncation = args.truncation
-    trunc = generator.mean_latent(4096).detach().clone()
     batch_size = args.batch_size
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -125,8 +143,8 @@ if __name__ == '__main__':
         imgs_real = []
         for i in index:
             z = latents[i]
-            img_rec, _ = generator([z.unsqueeze(0).to(device)], 
-                                    input_is_latent=True, 
+            img_rec, _ = generator([latent_normalize(z.unsqueeze(0).to(device))], 
+                                    input_is_latent=input_is_latent, 
                                     truncation=truncation,
                                     truncation_latent=trunc, 
                                     randomize_noise=False)
@@ -142,7 +160,8 @@ if __name__ == '__main__':
             img_row = torch.cat(img_row, dim=2)
             img.append(img_row)
         img = torch.cat(img, dim=1)
-        imsave('data_c100/verify.png', tensor2image(img))
+        filename = args.latent_path.replace('.pkl', '_verify.png')
+        imsave(filename, tensor2image(img))
         exit(0)
     
     if args.part is not None:
@@ -188,7 +207,8 @@ if __name__ == '__main__':
     vgg_loss = VGGLoss(device)
 
     toggle_grad(generator, False)
-    toggle_grad(encoder, False)
+    if encoder is not None:
+        toggle_grad(encoder, False)
 
     latents = []
     index = np.arange(len(data['labels']))
@@ -202,19 +222,32 @@ if __name__ == '__main__':
         imgs = imgs.to(device)
 
         with torch.no_grad():
-            z0 = encoder(imgs)
+            if encoder is not None:
+                z0 = encoder(imgs)
+            else:
+                if trunc is None:
+                    z0 = torch.randn(batch_size, latent_dim, device=device)
+                else:
+                    z0 = trunc.repeat(batch_size, n_latent, 1)
+                z0 = z0[:imgs.shape[0]]
+            if args.uniform_noise:
+                z0 = F.normalize(z0, p=2, dim=-1)
 
         z = z0.detach().clone()
         z.requires_grad = True
         optimizer = torch.optim.Adam([z], lr=args.lr_inv)
         for step in range(args.iters_inv):
-            imgs_gen, _ = generator([z], 
-                                    input_is_latent=True, 
+            imgs_gen, _ = generator([latent_normalize(z)], 
+                                    input_is_latent=input_is_latent, 
                                     truncation=truncation,
                                     truncation_latent=trunc, 
                                     randomize_noise=False)
-            z_hat = encoder(imgs_gen)
-            loss = F.mse_loss(imgs_gen, imgs) + vgg_loss(imgs_gen, imgs) + F.mse_loss(z0, z_hat)*2.0
+            if encoder is None:
+                loss_enc = 0
+            else:
+                z_hat = encoder(imgs_gen)
+                loss_enc = F.mse_loss(z0, z_hat) * 2.0
+            loss = F.mse_loss(imgs_gen, imgs) + vgg_loss(imgs_gen, imgs) + loss_enc
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()

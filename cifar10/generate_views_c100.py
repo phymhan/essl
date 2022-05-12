@@ -69,8 +69,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--image_size', type=int, default=32)
     parser.add_argument('--truncation', type=float, default=0.7)
-    parser.add_argument('--iters_inv', type=int, default=500)
-    parser.add_argument('--iters', type=int, default=4000)
+    parser.add_argument('--iters_inv', type=int, default=1000)
+    parser.add_argument('--iters', type=int, default=1000)
     parser.add_argument('--lr_inv', type=float, default=0.01)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd', 'lbfgs'])
@@ -100,6 +100,10 @@ if __name__ == '__main__':
     parser.add_argument('--invert', action='store_true')
     parser.add_argument("--augment_leaking", action='store_true', help="apply non-differentiable, 'leaking' augmentation")
     parser.add_argument("--which_transform", type=str, default='resizedcrop+horizontalflip+colorjitter+grayscale')
+    parser.add_argument("--start_from_recon", action='store_true')
+    parser.add_argument("--cache_prefix", type=str, default='')
+    parser.add_argument('--latent_dim', type=int, default=512)
+    parser.add_argument('--uniform_noise', action='store_true')
 
     args = parser.parse_args()
 
@@ -120,6 +124,7 @@ if __name__ == '__main__':
     import string
     import pickle
     cache = ''.join(random.choice(string.ascii_uppercase) for i in range(8))
+    cache = args.cache_prefix + cache
     cache = args.log_root + '/' + cache + '.pkl'
     if os.path.exists(cache):
         print('Loading cached data')
@@ -127,7 +132,7 @@ if __name__ == '__main__':
             data = pickle.load(f)
         imgs = data['imgs']
     else:
-        dataset = datasets.CIFAR10(root=args.data_root, download=True, transform=transform)
+        dataset = datasets.CIFAR100(root=args.data_root, download=True, transform=transform)
         loader = iter(torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True))
         imgs, _ = next(loader)
         with open(cache, 'wb') as f:
@@ -156,13 +161,14 @@ if __name__ == '__main__':
     g_ckpt = torch.load(args.g_ckpt, map_location=device)
 
     latent_dim = g_ckpt['args'].latent
+    assert latent_dim == args.latent_dim
 
     generator = Generator(image_size, latent_dim, 8).to(device)
     generator.load_state_dict(g_ckpt["g_ema"], strict=False)
     generator.eval()
     print('[generator loaded]')
 
-    if args.e_ckpt:
+    if args.e_ckpt and os.path.exists(args.e_ckpt):
         # e_model_path = '../pretrained/stylegan2-c10_e.pt'
         e_ckpt = torch.load(args.e_ckpt, map_location=device)
 
@@ -174,43 +180,37 @@ if __name__ == '__main__':
         encoder = None
         print('[no encoder loaded]')
 
-    truncation = args.truncation
-    trunc = generator.mean_latent(4096).detach().clone()
-
-    # with torch.no_grad():
-    #     latent = generator.get_latent(torch.randn(8*8, latent_dim, device=device))
-    #     imgs_gen, _ = generator([latent],
-    #                             truncation=truncation,
-    #                             truncation_latent=trunc,
-    #                             input_is_latent=True,
-    #                             randomize_noise=True)
-
-    #     result = []
-    #     for row in imgs_gen.chunk(8, dim=0):
-    #         result.append(torch.cat([img for img in row], dim=2))
-    #     result = torch.cat(result, dim=1)
-    #     print('generated samples:')
-    #     imsave(log_dir / 'gen_samples.png', tensor2image(result))
-
-    # Domain-guided encoder
-    # In-Domain Images
-
-    # dataset = datasets.CIFAR10(root=args.data_root, download=True, transform=transform)
-    # loader = iter(torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True))
-
-    # imgs, _ = next(loader)
-    # imgs = imgs.to(device)
+    # truncation = args.truncation
+    # trunc = generator.mean_latent(4096).detach().clone()
+    if args.uniform_noise:
+        truncation = 1
+        trunc = None
+        input_is_latent = False
+        n_latent = 1
+        latent_normalize = partial(F.normalize, p=2, dim=-1)
+        # latent_normalize = lambda x: x
+    else:
+        truncation = args.truncation
+        trunc = generator.mean_latent(4096).detach().clone()
+        input_is_latent = True
+        n_latent = args.n_latent
+        latent_normalize = lambda x: x
 
     imgs_real = torch.cat([img for img in imgs], dim=1)
 
     if data is None or 'z' not in data:
         with torch.no_grad():
             if encoder is None:
-                z0 = trunc.repeat(batch_size, args.n_latent, 1)
+                if trunc is None:
+                    z0 = torch.randn(batch_size, latent_dim, device=device)
+                else:
+                    z0 = trunc.repeat(batch_size, n_latent, 1)
             else:
                 z0 = encoder(imgs)
-            imgs_gen, _ =  generator([z0], 
-                                    input_is_latent=True,
+            if args.uniform_noise:
+                z0 = F.normalize(z0, p=2, dim=-1)
+            imgs_gen, _ =  generator([z0],
+                                    input_is_latent=input_is_latent,
                                     truncation=truncation,
                                     truncation_latent=trunc,
                                     randomize_noise=False)
@@ -221,13 +221,15 @@ if __name__ == '__main__':
         # In-domain inversion
         vgg_loss = VGGLoss(device)
         z = z0.detach().clone()
+        z = latent_normalize(z)
 
         z.requires_grad = True
         optimizer = torch.optim.Adam([z], lr=args.lr_inv)
 
         for step in range(args.iters_inv):
-            imgs_gen, _ = generator([z], 
-                                    input_is_latent=True, 
+            optimizer.zero_grad()
+            imgs_gen, _ = generator([latent_normalize(z)],
+                                    input_is_latent=input_is_latent, 
                                     truncation=truncation,
                                     truncation_latent=trunc, 
                                     randomize_noise=False)
@@ -237,11 +239,14 @@ if __name__ == '__main__':
                 z_hat = encoder(imgs_gen)
                 loss_enc = F.mse_loss(z0, z_hat)*2.0
             loss = F.mse_loss(imgs_gen, imgs) + vgg_loss(imgs_gen, imgs) + loss_enc
-            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
+            # if args.uniform_noise:
+            #     z = F.normalize(z, p=2, dim=-1)
+
             if step % 100 == 0:
+                print(f'[inv] step {step}/{args.iters_inv} loss {loss.item()}')
                 imgs_fakes = torch.cat([img_gen for img_gen in imgs_gen], dim=1)
                 imsave(log_dir / f'rec_step{step}.png', tensor2image(torch.cat([imgs_real, imgs_fakes], dim=2)))
 
@@ -264,6 +269,7 @@ if __name__ == '__main__':
         #                         randomize_noise=False)
 
     z1 = z.detach().clone()
+    z1 = latent_normalize(z1)
 
     if args.augment_leaking:
         vgg_loss = VGGLoss(device)
@@ -278,8 +284,8 @@ if __name__ == '__main__':
         z.requires_grad = True
         optimizer = torch.optim.Adam([z], lr=args.lr_inv)
         for step in range(args.iters_inv):
-            imgs_gen, _ = generator([z], 
-                                    input_is_latent=True, 
+            imgs_gen, _ = generator([latent_normalize(z)], 
+                                    input_is_latent=input_is_latent, 
                                     truncation=truncation,
                                     truncation_latent=trunc, 
                                     randomize_noise=False)
@@ -305,25 +311,6 @@ if __name__ == '__main__':
     # Define SimCLR encoder
     if args.no_proj:
         raise NotImplementedError
-        if args.objective == 'norm':
-            normalize = lambda x: x
-        elif args.objective == 'cosine':
-            normalize = partial(F.normalize, dim=1)
-        prefix = 'noproj'
-        from resnet import resnet18
-        model = resnet18(pretrained=False, num_classes=10)
-        checkpoint = torch.load('../pretrained/simclr-cifar10-resnet18-800ep-1.pth')
-        state_dict = checkpoint['state_dict']
-        for k in list(state_dict.keys()):
-            if k.startswith('encoder.'):
-                if k.startswith('encoder') and not k.startswith('encoder.fc'):
-                    # remove prefix
-                    state_dict[k[len("encoder."):]] = state_dict[k]
-            del state_dict[k]
-        log = model.load_state_dict(state_dict, strict=True)
-        # assert log.missing_keys == ['fc.weight', 'fc.bias']
-        # model = ResNetWrapper(model).to(device)
-        model.to(device)
     else:
         normalize = partial(F.normalize, dim=1)
         from resnet_big import SupConResNet
@@ -356,7 +343,7 @@ if __name__ == '__main__':
     imgs_rep = imgs.repeat_interleave(n, dim=0)
 
     imgs_rec, _ = generator([z1],
-                            input_is_latent=True,
+                            input_is_latent=input_is_latent,
                             truncation=truncation,
                             truncation_latent=trunc, 
                             randomize_noise=False)
@@ -377,15 +364,18 @@ if __name__ == '__main__':
     toggle_grad(generator, False)
 
     # h_img = model(imgs_rep)  # precompute
-    h_img = model(encoder_input_transform(imgs_rec).repeat_interleave(n, dim=0))  # start from the reconstructed images
+    if args.start_from_recon:
+        h_img = model(encoder_input_transform(imgs_rec).repeat_interleave(n, dim=0))  # start from the reconstructed images
+    else:
+        h_img = model(imgs_rep)
     h_img = normalize(h_img.squeeze()).detach()
 
     losses = []
     print('generating views...')
     done = False
     for step in range(args.iters):
-        imgs_gen, _ = generator([z],
-                                input_is_latent=True, 
+        imgs_gen, _ = generator([latent_normalize(z)],
+                                input_is_latent=input_is_latent, 
                                 truncation=truncation,
                                 truncation_latent=trunc, 
                                 randomize_noise=False)
@@ -430,49 +420,50 @@ if __name__ == '__main__':
         elif args.objective == 'cosine':
             losses.append(torch.sum(h_gen * h_img, dim=1).mean().item())
 
-        if done or step == 0 or step == args.iters - 1 or (step + 1) % args.save_every == 0:
-            imgs_gen, _ = generator([z],
-                                    input_is_latent=True,
-                                    truncation=truncation,
-                                    truncation_latent=trunc,
-                                    randomize_noise=False)  # after the update
-            if args.clamp:
-                imgs_gen = torch.clamp(imgs_gen, -1, 1)
-            h_gen = model(encoder_input_transform(imgs_gen))
-            h_gen = normalize(h_gen.squeeze())
+        with torch.no_grad():
+            if done or step == 0 or step == args.iters - 1 or (step + 1) % args.save_every == 0:
+                imgs_gen, _ = generator([latent_normalize(z)],
+                                        input_is_latent=input_is_latent,
+                                        truncation=truncation,
+                                        truncation_latent=trunc,
+                                        randomize_noise=False)  # after the update
+                if args.clamp:
+                    imgs_gen = torch.clamp(imgs_gen, -1, 1)
+                h_gen = model(encoder_input_transform(imgs_gen))
+                h_gen = normalize(h_gen.squeeze())
 
-            if args.objective == 'norm':
-                print(f'step: {step+1}, loss: {loss.item()}, norm: {torch.norm(h_gen - h_img, dim=1, p=p).mean().item()}, pdist: {pdist.mean().item()}')
-            elif args.objective == 'cosine':
-                print(f'step: {step+1}, loss: {loss.item()}, cos: {torch.sum(h_gen * h_img, dim=1).mean().item()}, pdist: {pdist.mean().item()}')
-            # st()
-            # imsave(log_dir / 'debug_clamp.png', tensor2image(torch.cat([xx for xx in torch.clamp(imgs_gen[32:40,...], -1, 1)], dim=2)))
-
-            imgs_gen = imgs_gen.view(batch_size, n, 3, image_size, image_size)
-            imgs_fakes = []
-            imgs_diffs = []
-            for j in range(n):
-                imgs_fakes.append(torch.cat([img_gen for img_gen in imgs_gen[:,j,...]], dim=1))
-                img_diff = torch.cat([img_gen for img_gen in imgs_gen[:,j,...] - imgs_rec], dim=1)
-                imgs_diffs.append((img_diff - img_diff.min()) / (img_diff.max() - img_diff.min()) * 2 - 1)
-            imsave(log_dir / f'view_{step+1:04d}.png', tensor2image(torch.cat([imgs_real, imgs_recon, imgs_blank] + imgs_fakes, dim=2)))
-            imsave(log_dir / f'diff_{step+1:04d}.png', tensor2image(torch.cat([imgs_real, imgs_recon, imgs_blank] + imgs_diffs, dim=2)))
-            image_tensor = torch.cat([imgs_real, imgs_recon, imgs_blank] + imgs_fakes, dim=2)
-            if USE_HTML:
                 if args.objective == 'norm':
-                    header = f'step: {step+1}, loss: {loss.item()}, norm: {torch.norm(h_gen - h_img, dim=1, p=p).mean().item()}, pdist: {pdist.mean().item()}'
+                    print(f'step: {step+1}, loss: {loss.item()}, norm: {torch.norm(h_gen - h_img, dim=1, p=p).mean().item()}, pdist: {pdist.mean().item()}')
                 elif args.objective == 'cosine':
-                    header = f'step: {step+1}, loss: {loss.item()}, cos: {torch.sum(h_gen * h_img, dim=1).mean().item()}, pdist: {pdist.mean().item()}'
-                webpage.add_header(header)
-                utils_html.save_grid(
-                    webpage=webpage,
-                    tensor=[(image_tensor + 1) / 2],
-                    caption=[f'real recon | views x {n}'],
-                    name=f'{step+1:04d}',
-                    nrow=[1],
-                    width=768,
-                )
-        
+                    print(f'step: {step+1}, loss: {loss.item()}, cos: {torch.sum(h_gen * h_img, dim=1).mean().item()}, pdist: {pdist.mean().item()}')
+                # st()
+                # imsave(log_dir / 'debug_clamp.png', tensor2image(torch.cat([xx for xx in torch.clamp(imgs_gen[32:40,...], -1, 1)], dim=2)))
+
+                imgs_gen = imgs_gen.view(batch_size, n, 3, image_size, image_size)
+                imgs_fakes = []
+                imgs_diffs = []
+                for j in range(n):
+                    imgs_fakes.append(torch.cat([img_gen for img_gen in imgs_gen[:,j,...]], dim=1))
+                    img_diff = torch.cat([img_gen for img_gen in imgs_gen[:,j,...] - imgs_rec], dim=1)
+                    imgs_diffs.append((img_diff - img_diff.min()) / (img_diff.max() - img_diff.min()) * 2 - 1)
+                imsave(log_dir / f'view_{step+1:04d}.png', tensor2image(torch.cat([imgs_real, imgs_recon, imgs_blank] + imgs_fakes, dim=2)))
+                imsave(log_dir / f'diff_{step+1:04d}.png', tensor2image(torch.cat([imgs_real, imgs_recon, imgs_blank] + imgs_diffs, dim=2)))
+                image_tensor = torch.cat([imgs_real, imgs_recon, imgs_blank] + imgs_fakes, dim=2)
+                if USE_HTML:
+                    if args.objective == 'norm':
+                        header = f'step: {step+1}, loss: {loss.item()}, norm: {torch.norm(h_gen - h_img, dim=1, p=p).mean().item()}, pdist: {pdist.mean().item()}'
+                    elif args.objective == 'cosine':
+                        header = f'step: {step+1}, loss: {loss.item()}, cos: {torch.sum(h_gen * h_img, dim=1).mean().item()}, pdist: {pdist.mean().item()}'
+                    webpage.add_header(header)
+                    utils_html.save_grid(
+                        webpage=webpage,
+                        tensor=[(image_tensor + 1) / 2],
+                        caption=[f'real recon | views x {n}'],
+                        name=f'{step+1:04d}',
+                        nrow=[1],
+                        width=768,
+                    )
+            
         if done:
             print(f"loss is {loss.item()}!")
             if args.objective == 'norm':
