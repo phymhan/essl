@@ -481,22 +481,6 @@ def get_viewmaker(args, which_viewmaker='none', branch=None, eval_mode=False):
             freeze_encoder=freeze_encoder,
         )
         viewmaker_kwargs = {}
-    elif which_viewmaker == 'gaussian':
-        from view_generator import GaussianViewGenerator, get_gan_models
-        gan_gen, _ = get_gan_models('cuda', no_encoder=True)
-        viewmaker = GaussianViewGenerator(
-            gan_generator=gan_gen,
-            gan_encoder=None,
-            simclr_encoder=None,
-            idinvert_steps=0,
-            boundary_steps=0,
-            boundary_epsilon=0,
-            fgsm_stepsize=0,
-            freeze_encoder=True,
-        )
-        viewmaker_kwargs = {
-            'noise_std': args.gaussian_noise_std,
-        }
     elif which_viewmaker == 'stn':
         from view_generator import SpatialTransformerGenerator
         if args.pretrained_encoder_path:
@@ -679,7 +663,7 @@ def ssl_loop(args, encoder=None, logger=None):
     criterion = None
     if args.which_loss == 'simclr_supcon':
         from losses import SupConLoss
-        criterion = SupConLoss(temperature=args.temp, base_temperature=args.base_temp)
+        criterion = SupConLoss(temperature=args.temp)
 
     # training
     for e in range(start_epoch, args.epochs + 1):
@@ -717,7 +701,7 @@ def ssl_loop(args, encoder=None, logger=None):
             def forward_step():
                 x1 = inputs[0].cuda()
                 x2 = inputs[1].cuda()
-                if not args.concat_inputs:  # concat will done in the loss
+                if args.which_loss != 'simclr_supcon':
                     b1 = backbone(x1)
                     b2 = backbone(x2)
                     z1 = projector(b1)
@@ -725,20 +709,8 @@ def ssl_loop(args, encoder=None, logger=None):
 
                 # forward pass
                 if args.which_loss == 'simclr':
-                    if args.concat_inputs:
-                        x = torch.cat([x1, x2], dim=0)
-                        b = backbone(x)
-                        z = projector(b)
-                        z = F.normalize(z, dim=1)
-                        z1, z2 = torch.split(z, args.bsz, dim=0)
                     loss = info_nce_loss(z1, z2) / 2 + info_nce_loss(z2, z1) / 2
                 elif args.which_loss == 'simclr_all':
-                    if args.concat_inputs:
-                        x = torch.cat([x1, x2], dim=0)
-                        b = backbone(x)
-                        z = projector(b)
-                        z = F.normalize(z, dim=1)
-                        z1, z2 = torch.split(z, args.bsz, dim=0)
                     loss = simclr_loss(z1, z2, args.temp, args.base_temp)
                 elif args.which_loss == 'simclr_supcon':
                     x = torch.cat([x1, x2], dim=0)
@@ -778,49 +750,13 @@ def ssl_loop(args, encoder=None, logger=None):
                     z4 = F.normalize(z4, dim=1)
                     loss = supcon_pos_neg_loss(z1, z2, z3, z4)
                 elif args.which_loss == 'simclr+supcon':
+                    z1 = F.normalize(z1, dim=1)
+                    z2 = F.normalize(z2, dim=1)
                     x3 = inputs[3]
-                    if args.concat_inputs:
-                        x = torch.cat([x1, x2, x3], dim=0)
-                        b = backbone(x)
-                        z = projector(b)
-                        z = F.normalize(z, dim=1)
-                        z1, z2, z3 = torch.split(z, args.bsz, dim=0)
-                    else:
-                        b3 = backbone(x3)
-                        z3 = projector(b3)
-                    # z1 = F.normalize(z1, dim=1)
-                    # z2 = F.normalize(z2, dim=1)
-                    # z3 = F.normalize(z3, dim=1)
+                    b3 = backbone(x3)
+                    z3 = projector(b3)
+                    z3 = F.normalize(z3, dim=1)
                     loss = supcon_loss(z1, z2, z3)
-                elif args.which_loss == 'simclr_3_views':
-                    x3 = inputs[2].cuda()  # NOTE: reuse inputs[2]
-                    if args.concat_inputs:
-                        x = torch.cat([x1, x2, x3], dim=0)
-                        b = backbone(x)
-                        z = projector(b)
-                        z = F.normalize(z, dim=1)
-                        z1, z2, z3 = torch.split(z, args.bsz, dim=0)
-                    else:
-                        b3 = backbone(x3)
-                        z3 = projector(b3)
-                    loss = supcon_loss(z1, z2, z3)
-                elif args.which_loss == 'simclr-rep_vg4+a2-diag':
-                    x3 = inputs[2].cuda()  # NOTE: reuse inputs[2]
-                    if args.concat_inputs:
-                        x = torch.cat([x1, x2, x3], dim=0)
-                        b = backbone(x)
-                        z = projector(b)
-                        z = F.normalize(z, dim=1)
-                        z1, z2, z3 = torch.split(z, args.bsz, dim=0)
-                    else:
-                        b3 = backbone(x3)
-                        z3 = projector(b3)
-                        z1 = F.normalize(z1, dim=1)
-                        z2 = F.normalize(z2, dim=1)
-                        z3 = F.normalize(z3, dim=1)
-                    loss = info_nce_loss(z1, z2) / 2 + info_nce_loss(z2, z1) / 2
-                    inner_prod = torch.mean(torch.sum(z1 * z3, dim=1)) / 2 + torch.mean(torch.sum(z2 * z3, dim=1)) / 2
-                    loss = loss - inner_prod
                 elif args.which_loss == 'simsiam':
                     p1 = predictor(z1)
                     p2 = predictor(z2)
@@ -1140,7 +1076,7 @@ if __name__ == '__main__':
     parser.add_argument('--wandb_step_offset', default=-1, type=int,
         help='this is to be compatible with old runs, since epoch starts from 1.')
     parser.add_argument('--use_view_generator', action='store_true')
-    parser.add_argument('--which_view_generator', default='none', type=str, choices=['none', 'gan', 'gaussian', 'cache', 'stn', 'stnrand', 'stnrand2', 'stncrop'])
+    parser.add_argument('--which_view_generator', default='none', type=str, choices=['none', 'gan', 'cache', 'stn', 'stnrand', 'stnrand2', 'stncrop'])
     parser.add_argument('--data_path', type=str, default='data/c10_data2.pkl')
     parser.add_argument('--latent_path', type=str, default='data/c10_latent.pkl')
     parser.add_argument('--view_paths', type=str, default='')
@@ -1155,10 +1091,7 @@ if __name__ == '__main__':
     parser.add_argument('--which_transform1', type=str, default='resizedcrop+horizontalflip+colorjitter+grayscale')
     parser.add_argument('--which_transform2', type=str, default='resizedcrophalf+horizontalflip+colorjitter+grayscale')
     parser.add_argument('--which_transform3', type=str, default='horizontalflip+gan')
-    parser.add_argument('--which_loss', type=str, default='simclr',
-        choices=['simclr', 'simsiam', 'simclr+pos', 'simclr+supcon',
-            'simclr_all', 'simclr_supcon', 'simclr-neg', 'simclr+pos-neg',
-            'simclr_3_views', 'simclr-rep_vg4+a2-diag'],
+    parser.add_argument('--which_loss', type=str, default='simclr', choices=['simclr', 'simsiam', 'simclr+pos', 'simclr+supcon', 'simclr_all', 'simclr_supcon', 'simclr-neg', 'simclr+pos-neg'], 
         help='--loss is kept for compatibility with the original code')
     parser.add_argument('--code_to_save', type=str, default='utils_data.py,view_generator.py',
         help='source files to save, note that main2.py will be saved in print_args')
@@ -1195,8 +1128,6 @@ if __name__ == '__main__':
     parser.add_argument('--pos_view_paths', type=str, default='')
     parser.add_argument('--neg_view_paths', type=str, default='')
     parser.add_argument('--add_smallcrop', action='store_true')
-    parser.add_argument('--concat_inputs', action='store_true')
-    parser.add_argument('--gaussian_noise_std', default=0.2, type=float)
     args = parser.parse_args()
 
     args.log_dir = Path(args.path_dir)  # NOTE: for compatibility
@@ -1208,9 +1139,6 @@ if __name__ == '__main__':
         args.num_workers = 0
         args.eval_loops = 1
         args.limit_train_batches = 0.1
-    
-    if args.which_loss == 'simclr_supcon':
-        args.concat_inputs = True
     
     if args.cuda is not None:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.cuda

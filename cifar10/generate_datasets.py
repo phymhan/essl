@@ -18,6 +18,7 @@ from pathlib import Path
 import argparse
 import utils
 from tqdm import tqdm
+from rich.progress import track
 from utils import toggle_grad, image2tensor, tensor2image, imshow, imsave, Config
 import pickle
 from einops import rearrange
@@ -81,6 +82,8 @@ if __name__ == '__main__':
     parser.add_argument('--merge', action='store_true')
     parser.add_argument('--add_noise', action='store_true')
     parser.add_argument('--start_from_orig', action='store_true')
+    parser.add_argument('--expert', action='store_true')
+    parser.add_argument('--uint8', action='store_true')
     args = parser.parse_args()
 
     # utils.fix_seed(args.seed)
@@ -96,6 +99,48 @@ if __name__ == '__main__':
         views = torch.cat(views, dim=1)  # NOTE: batch is second dim
         with open(args.dest_data_path, 'wb') as f:
             pickle.dump({'seed': args.seed, 'n_part': args.n_part, 'n_views': args.n, 'views': views}, f)
+        exit(0)
+    
+    """ expert
+    """
+    if args.expert:
+        # mean = (0.5071, 0.4867, 0.4408)
+        # std = (0.2675, 0.2565, 0.2761)
+        # normalize = T.Normalize(mean=mean, std=std)
+        expert_transform = T.Compose([
+            T.Normalize([-1, -1, -1], [2, 2, 2]),
+            T.RandomResizedCrop(size=32, scale=(0.2, 1.)),
+            T.RandomHorizontalFlip(p=0.5),
+            T.RandomApply([
+                T.ColorJitter(0.4, 0.4, 0.4, 0.1)
+            ], p=0.8),
+            T.RandomGrayscale(p=0.2),
+            # T.ToTensor(),
+            T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ])
+        n = args.n
+        batch_size = args.batch_size
+        with open(args.data_path, 'rb') as f:
+            data = pickle.load(f)
+        images = data['images']
+        labels = data['labels']
+        print('[data loaded]')
+
+        index = np.arange(len(labels))
+        views_image = []
+        for i in track(range(int(np.ceil(len(index) / batch_size)))):
+            inds = index[i * batch_size:(i + 1) * batch_size]
+            bsz = len(inds)
+            imgs = images[inds]
+            imgs_aug = [expert_transform(imgs) for _ in range(n)]
+            imgs_aug = torch.stack(imgs_aug, dim=1)
+            views_image.append(imgs_aug)
+
+        views_image = torch.cat(views_image, dim=0)
+        views = {'n_views': n}
+        views['views'] = views_image.transpose(0, 1)  # [n_views, B, 3, H, W]
+        with open(os.path.join(args.dest_data_path), 'wb') as f:
+            pickle.dump(views, f)
         exit(0)
 
     # name = args.name

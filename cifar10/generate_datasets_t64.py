@@ -18,6 +18,7 @@ from pathlib import Path
 import argparse
 import utils
 from tqdm import tqdm
+from rich.progress import track
 from utils import toggle_grad, image2tensor, tensor2image, imshow, imsave, Config
 import pickle
 from einops import rearrange
@@ -80,9 +81,13 @@ if __name__ == '__main__':
     parser.add_argument('--clamp', action='store_true')
     parser.add_argument('--merge', action='store_true')
     parser.add_argument('--to_uint8', action='store_true')
+    parser.add_argument('--uint8', action='store_true')
     parser.add_argument('--add_noise', action='store_true')
     parser.add_argument('--start_from_orig', action='store_true')
     parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--g_ckpt', type=str, default='/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0401_gan_t64/weight/latest.pt')
+    parser.add_argument('--expert', action='store_true')
+    parser.add_argument('--solarize', action='store_true')
     args = parser.parse_args()
 
     # utils.fix_seed(args.seed)
@@ -112,6 +117,68 @@ if __name__ == '__main__':
         with open(dest_data_path, 'wb') as f:
             pickle.dump(data, f)
         exit(0)
+    
+    input_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
+    
+    """ expert
+    """
+    if args.expert:
+        # mean = (0.5071, 0.4867, 0.4408)
+        # std = (0.2675, 0.2565, 0.2761)
+        # normalize = T.Normalize(mean=mean, std=std)
+        if args.solarize:
+            expert_transform = T.Compose([
+                T.Normalize([-1, -1, -1], [2, 2, 2]),
+                T.RandomResizedCrop(size=64, scale=(0.2, 1.)),
+                T.RandomHorizontalFlip(),
+                T.RandomApply([
+                    T.ColorJitter(0.4, 0.4, 0.4, 0.1)
+                ], p=0.8),
+                T.RandomGrayscale(p=0.2),
+                T.RandomSolarize(0.5),
+                # T.ToTensor(),
+                T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ])
+        else:
+            expert_transform = T.Compose([
+                T.Normalize([-1, -1, -1], [2, 2, 2]),
+                T.RandomResizedCrop(size=64, scale=(0.2, 1.)),
+                T.RandomHorizontalFlip(),
+                T.RandomApply([
+                    T.ColorJitter(0.4, 0.4, 0.4, 0.1)
+                ], p=0.8),
+                T.RandomGrayscale(p=0.2),
+                # T.ToTensor(),
+                T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ])
+        n = args.n
+        batch_size = args.batch_size
+        with open(args.data_path, 'rb') as f:
+            data = pickle.load(f)
+        images = data['images']
+        labels = data['labels']
+        print('[data loaded]')
+
+        index = np.arange(len(labels))
+        views_image = []
+        for i in track(range(int(np.ceil(len(index) / batch_size)))):
+            inds = index[i * batch_size:(i + 1) * batch_size]
+            bsz = len(inds)
+            imgs = images[inds]
+            imgs = torch.stack([input_transform(x) for x in imgs])
+            imgs_aug = [expert_transform(imgs) for _ in range(n)]
+            imgs_aug = torch.stack(imgs_aug, dim=1)
+            views_image.append(imgs_aug)
+
+        views_image = torch.cat(views_image, dim=0)
+        views = {'n_views': n}
+        views['views'] = views_image.transpose(0, 1)  # [n_views, B, 3, H, W]
+        with open(os.path.join(args.dest_data_path), 'wb') as f:
+            pickle.dump(views, f)
+        exit(0)
 
     # name = args.name
     args.clamp = True
@@ -120,8 +187,8 @@ if __name__ == '__main__':
     image_size = args.image_size
     tol = 1e-3
 
-    g_model_path = '/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0401_gan_t64/weight/latest.pt'
-    g_ckpt = torch.load(g_model_path, map_location=device)
+    # g_model_path = '/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0401_gan_t64/weight/latest.pt'
+    g_ckpt = torch.load(args.g_ckpt, map_location=device)
 
     latent_dim = g_ckpt['args'].latent
 
@@ -201,11 +268,6 @@ if __name__ == '__main__':
             T.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
         ]
     )
-
-    input_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
 
     toggle_grad(model, False)
     toggle_grad(generator, False)
@@ -328,12 +390,22 @@ if __name__ == '__main__':
         imgs_gen = imgs_gen.view(bsz, n, 3, image_size, image_size)
         z = rearrange(z, '(b n) m d -> b n m d', b = bsz, n = n)
         views_latent.append(z.detach().cpu().data)
-        views_image.append(imgs_gen.detach().cpu().data)
+        if args.uint8:
+            imgs_gen = ((imgs_gen.detach().cpu().data + 1) * 127.5).round().to(torch.uint8).numpy()
+            imgs_gen = np.transpose(imgs_gen, (1, 0, 2, 3, 4))
+        else:
+            imgs_gen = imgs_gen.detach().cpu().data
+        views_image.append(imgs_gen)
 
-    views_image = torch.cat(views_image, dim=0)
     views_latent = torch.cat(views_latent, dim=0)
+    if args.uint8:
+        views_image = np.concatenate(views_image, axis=1)
+    else:
+        views_image = torch.cat(views_image, dim=0)
+        views_image = views_image.transpose(0, 1)  # [n_views, B, 3, H, W]
+
     views = {'n_views': n}
-    views['views'] = views_image.transpose(0, 1)  # [n_views, B, 3, H, W]
-    views['latents'] = views_latent.transpose(0, 1)  # [n_views, B, M, D]
+    views['views'] = views_image
+    # views['latents'] = views_latent.transpose(0, 1)  # [n_views, B, M, D]
     with open(os.path.join(args.dest_data_path), 'wb') as f:
         pickle.dump(views, f)

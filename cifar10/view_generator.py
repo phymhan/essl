@@ -19,8 +19,9 @@ import pdb
 st = pdb.set_trace
 
 def toggle_grad(model, on_or_off):
-    for param in model.parameters():
-        param.requires_grad = on_or_off
+    if model is not None:
+        for param in model.parameters():
+            param.requires_grad = on_or_off
 
 class VGGLoss(nn.Module):
     def __init__(self, device, n_layers=5):
@@ -55,7 +56,7 @@ class VGGLoss(nn.Module):
             
         return loss
 
-def get_gan_models(device):
+def get_gan_models(device, no_encoder=False):
     print('loading stylegan models...')
     g_model_path = '../pretrained/stylegan2-c10_g.pt'
     g_ckpt = torch.load(g_model_path, map_location=device)
@@ -64,12 +65,15 @@ def get_gan_models(device):
     generator.load_state_dict(g_ckpt["g_ema"], strict=False)
     generator.eval()
     print('[generator loaded]')
-    e_model_path = '../pretrained/stylegan2-c10_e.pt'
-    e_ckpt = torch.load(e_model_path, map_location=device)
-    encoder = Encoder(32, latent_dim).to(device)
-    encoder.load_state_dict(e_ckpt['e'])
-    encoder.eval()
-    print('[encoder loaded]')
+    if no_encoder:
+        encoder = None
+    else:
+        e_model_path = '../pretrained/stylegan2-c10_e.pt'
+        e_ckpt = torch.load(e_model_path, map_location=device)
+        encoder = Encoder(32, latent_dim).to(device)
+        encoder.load_state_dict(e_ckpt['e'])
+        encoder.eval()
+        print('[encoder loaded]')
     return generator, encoder
 
 
@@ -388,3 +392,55 @@ class RandomResizedCropGenerator(nn.Module):
         i, j, h, w = self.get_params(x, scale, ratio)
         x_new = TF.resized_crop(x, i, j, h, w, x.shape[-2:])
         return x_new
+
+
+class GaussianViewGenerator(nn.Module):
+    def __init__(
+        self,
+        gan_generator=None,
+        gan_encoder=None,
+        simclr_encoder=None,
+        idinvert_steps=100,
+        boundary_steps=100,
+        boundary_epsilon=0.9,
+        fgsm_stepsize=0.1,
+        freeze_encoder=False,
+        **kwargs
+    ):
+        super().__init__()
+        self.gan_generator = gan_generator
+        self.gan_encoder = gan_encoder
+        self.simclr_encoder = simclr_encoder
+        self.boundary_steps = boundary_steps
+        self.boundary_epsilon = boundary_epsilon
+        trunc = self.gan_generator.mean_latent(4096).detach().clone()
+        self.register_buffer('gan_trunc', trunc)
+        # self.vgg_loss = VGGLoss('cuda')
+        self.input2simclr_transform = T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
+        self.gan2simclr_transform = T.Compose([
+            T.Normalize([-1, -1, -1], [2, 2, 2]),  # to [0, 1]
+            T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
+        ])  # gan to simclr default
+        self.input2gan_transform = T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # [0, 1] to [-1, 1]
+        self.gan2output_transform = T.Normalize([-1, -1, -1], [2, 2, 2])  # [-1, 1] to [0, 1]
+        toggle_grad(self.gan_generator, False)
+        toggle_grad(self.gan_encoder, False)
+        if freeze_encoder:
+            toggle_grad(self.simclr_encoder, False)
+        self.freeze_encoder = freeze_encoder
+        self.fgsm_stepsize = fgsm_stepsize
+
+    def forward(self, x, w=None, **kwargs):
+        noise_std = kwargs.get('noise_std', 0.2)
+        w_noise = torch.randn_like(w) * noise_std
+        w = w + w_noise
+        with torch.no_grad():
+            x_gen, _ = self.gan_generator(
+                [w],
+                input_is_latent=True,
+                truncation=0.7,
+                truncation_latent=self.gan_trunc,
+                randomize_noise=False)
+        x_gen = self.gan2output_transform(torch.clamp(x_gen, -1, 1))
+        x_gen = x_gen.detach().clone()
+        return x_gen
