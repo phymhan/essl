@@ -27,6 +27,7 @@ class MultiViewDataset(torch.utils.data.Dataset):
         subset_index=None,
         sample_from_mixed=False,
         sample_original=False,
+        n_cache=8,
     ):
         """
         images: [x0, x1, x2, x3, ...]
@@ -66,11 +67,12 @@ class MultiViewDataset(torch.utils.data.Dataset):
             assert os.path.exists(view_path), f'view_path {view_path} does not exist'
             with open(view_path, 'rb') as f:
                 view = pickle.load(f)
-            views.append(view['views'][:, subset_index])
+            views.append(view['views'][:n_cache, subset_index])
         # NOTE: original data is view_0 (this is convenient if we want to sample from mixed pool)
         self.views = torch.cat([self.data['images'].unsqueeze(0)] + views, dim=0)
         self.total_views = self.views.shape[0]  # NOTE: including original data view_0
         self.n_views = n_views  # NOTE: number of generated views to sample
+        self.n_cache = n_cache
         assert sample_original or self.n_views <= self.total_views - int(not sample_from_mixed)
         self.sample_from_mixed = sample_from_mixed
         self.sample_original = sample_original

@@ -17,7 +17,7 @@ from torch.cuda.amp import autocast, GradScaler
 import torchvision
 import torchvision.transforms as T
 
-from utils import knn_monitor, fix_seed, setup_wandb, print_args, get_last_checkpoint, logging_file, str2list
+from utils import knn_monitor, fix_seed, setup_wandb, print_args, get_last_checkpoint, logging_file, str2list, toggle_grad
 # from losses import info_nce_loss
 
 import pdb
@@ -178,6 +178,7 @@ def get_train_dataset_and_transforms(args):
             transform2=pre_transform2,
             transform3=pre_transform3,
             n_views=args.n_views_gan,
+            n_cache=args.n_cache_gan,
             train=True,
             sample_from_mixed=sample_from_mixed,
             sample_original=args.sample_original,
@@ -904,6 +905,7 @@ def ssl_loop(args, encoder=None, logger=None):
 def eval_loop(args, branch, file_to_update, ind=None, logger=None):
     args.n_views_gan = min(1, args.n_views_gan)
     encoder = copy.deepcopy(branch.encoder)
+    toggle_grad(encoder, False)
     if args.eval_train_transform:
         viewmaker, viewmaker_kwargs = get_viewmaker(args, args.which_view_generator, branch, eval_mode=True)
     else:
@@ -991,7 +993,10 @@ def eval_loop(args, branch, file_to_update, ind=None, logger=None):
     scaler = GradScaler()
 
     # training
+    start_time = time.time()
+
     for e in range(1, 101):
+
         # declaring train
         classifier.train()
         encoder.eval()
@@ -1000,12 +1005,18 @@ def eval_loop(args, branch, file_to_update, ind=None, logger=None):
             if args.eval_train_transform:
                 inputs, w, y = batch
                 inputs = [x.cuda() for x in inputs]
-                w = w.cuda()
-                for j in range(args.n_views_gan):
-                    view_j = viewmaker(inputs[3 + j], w, **viewmaker_kwargs)
-                    inputs[3 + j] = post_transform3(view_j) if post_transform3 is not None else view_j
-                index = np.random.choice([0, 1, 3], inputs[0].size(0), p=transform_probabilities)
-                images = torch.stack([inputs[index[b]][b] for b in range(inputs[0].size(0))])
+                if args.quick_test:
+                    if post_transform3 is not None:
+                        inputs[3] = post_transform3(inputs[3])
+                    k = np.random.choice([0, 1, 3], p=transform_probabilities)
+                    images = inputs[k]
+                else:
+                    w = w.cuda()
+                    for j in range(args.n_views_gan):
+                        view_j = viewmaker(inputs[3 + j], w, **viewmaker_kwargs)
+                        inputs[3 + j] = post_transform3(view_j) if post_transform3 is not None else view_j
+                    index = np.random.choice([0, 1, 3], inputs[0].size(0), p=transform_probabilities)
+                    images = torch.stack([inputs[index[b]][b] for b in range(inputs[0].size(0))])
             else:
                 images, y = batch
                 images = images.cuda()
@@ -1056,7 +1067,8 @@ def eval_loop(args, branch, file_to_update, ind=None, logger=None):
             accuracy = np.mean(accs) * 100
             # final report of the accuracy
             line_to_print = (
-                f'seed: {ind} | accuracy (%) @ epoch {e}: {accuracy:.2f}'
+                f'seed: {ind} | accuracy (%) @ epoch {e}: {accuracy:.2f} | '
+                f'time_elapsed: {(time.time() - start_time):.1f}s'
             )
             file_to_update.write(line_to_print + '\n')
             file_to_update.flush()
@@ -1197,6 +1209,8 @@ if __name__ == '__main__':
     parser.add_argument('--add_smallcrop', action='store_true')
     parser.add_argument('--concat_inputs', action='store_true')
     parser.add_argument('--gaussian_noise_std', default=0.2, type=float)
+    parser.add_argument('--n_cache_gan', default=8, type=int)
+    parser.add_argument('--quick_test', action='store_true')
     args = parser.parse_args()
 
     args.log_dir = Path(args.path_dir)  # NOTE: for compatibility
@@ -1238,6 +1252,8 @@ if __name__ == '__main__':
     if args.linear_probe:
         NO_LOGGING = True
         args.use_wandb = False
+        if args.checkpoint_path == 'self':
+            args.checkpoint_path = args.log_dir / 'weights' / '800.pt'
         assert args.checkpoint_path and os.path.exists(args.checkpoint_path)
 
     # ========== check args ==========
