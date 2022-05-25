@@ -234,7 +234,12 @@ if __name__ == '__main__':
     z_sims = []
     w_sims = []
 
+    orig_latents = []
     view_latents = []
+    gauss_latents = []
+    z_anchor = []
+    z_gan = []
+    z_gauss = []
 
     for i in track(range(int(args.N / batch_size))):
         inds = index[i * batch_size: (i + 1) * batch_size]
@@ -391,11 +396,24 @@ if __name__ == '__main__':
 
         if n_latent == 1:
             z = rearrange(z, '(b n) d -> b n d', b = bsz, n = n)
+            w_n = rearrange(w_n, '(b n) d -> b n d', b = bsz, n = n)
         else:
             z = rearrange(z, '(b n) m d -> b n m d', b = bsz, n = n)
+            w_n = rearrange(w_n, '(b n) m d -> b n m d', b = bsz, n = n)
         view_latents.append(z.detach().cpu().data)
+        orig_latents.append(w0.unsqueeze(1).cpu().data)
+        gauss_latents.append(w_n.cpu().data)
+        z_anchor.append(z_orig.reshape(bsz, n, -1).cpu().data)
+        z_gan.append(h_gen.reshape(bsz, n, -1).cpu().data)
+        z_gauss.append(z_n.reshape(bsz, n, -1).cpu().data)
 
     view_latents = torch.cat(view_latents, dim=0)
+    orig_latents = torch.cat(orig_latents, dim=0)
+    gauss_latents = torch.cat(gauss_latents, dim=0)
+    z_anchor = torch.cat(z_anchor, dim=0)
+    z_gan = torch.cat(z_gan, dim=0)
+    z_gauss = torch.cat(z_gauss, dim=0)
+
     f_norms = torch.cat(f_norms, dim=0).numpy()
     g_norms = torch.cat(g_norms, dim=0).numpy()
     z_norms = torch.cat(z_norms, dim=0)
@@ -408,14 +426,19 @@ if __name__ == '__main__':
     z_sims = torch.cat(z_sims, dim=0).numpy()
     w_sims = torch.cat(w_sims, dim=0).numpy()
 
-    if args.loss_type != 'hinge' and args.N >= 1000:
+    if args.loss_type != 'hinge' and args.N >= 10:
         views = {'n_views': n}
         views['latents'] = view_latents.transpose(0, 1)  # [n_views, B, M, D]
-        pickle_file_name = args.name.replace('.png', '_view_latents.pkl')
+        views['orig_latents'] = orig_latents.transpose(0, 1)  # [1, B, M, D]
+        views['gauss_latents'] = gauss_latents.transpose(0, 1)
+        views['z_anchor'] = z_anchor.transpose(0, 1)
+        views['z_gan'] = z_gan.transpose(0, 1)
+        views['z_gauss'] = z_gauss.transpose(0, 1)
+        pickle_file_name = args.name.replace('.png', '_view_latents1.pkl')
         with open(os.path.join(pickle_file_name), 'wb') as f:
             pickle.dump(views, f)
-    
-    pickle_file_name = args.name.replace('.png', f'_stats.pkl')
+
+    pickle_file_name = args.name.replace('.png', f'_stats1.pkl')
     with open(os.path.join(pickle_file_name), 'wb') as f:
         pickle.dump({
             'f_norms': f_norms, 'f_sims': f_sims, 'g_norms': g_norms, 'g_sims': g_sims,

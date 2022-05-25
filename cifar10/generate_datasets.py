@@ -222,7 +222,10 @@ if __name__ == '__main__':
         model = Branch(args_simclr).to(device)
         saved_dict = torch.load('../pretrained/simclr-cifar10-resnet18-800ep-1.pth')['state_dict']
         model.load_state_dict(saved_dict, strict=True)
-    model.eval()
+    
+    # ========== eval ==========
+    model.eval()  # NOTE: eval mode
+    # ========== eval ==========
 
     # input transform
     encoder_input_transform = T.Compose(

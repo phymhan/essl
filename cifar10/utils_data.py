@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torchvision
 import torchvision.transforms as T
+import torchvision.transforms.functional as TF
 # from torch.utils.data.dataset import Subset
 # from torchvision.transforms import (CenterCrop, Compose, RandomHorizontalFlip, Resize, ToTensor)
 
@@ -28,6 +29,7 @@ class MultiViewDataset(torch.utils.data.Dataset):
         sample_from_mixed=False,
         sample_original=False,
         n_cache=8,
+        uint8=False,
     ):
         """
         images: [x0, x1, x2, x3, ...]
@@ -41,6 +43,7 @@ class MultiViewDataset(torch.utils.data.Dataset):
         self.transform1 = transform1
         self.transform2 = transform2
         self.transform3 = transform3
+        self.uint8 = uint8
         # load data
         assert os.path.exists(data_path), f'data_path {data_path} does not exist'
         with open(data_path, 'rb') as f:
@@ -78,8 +81,14 @@ class MultiViewDataset(torch.utils.data.Dataset):
         self.sample_original = sample_original
         self.dataset_len = len(subset_index)
     
+    # def data_transform(self, image_tensor):
+    #     image_tensor = (image_tensor + 1) / 2
+    #     return image_tensor
     def data_transform(self, image_tensor):
-        image_tensor = (image_tensor + 1) / 2
+        if self.uint8:
+            image_tensor = TF.to_tensor(image_tensor)
+        else:
+            image_tensor = (image_tensor + 1) / 2
         return image_tensor
 
     def __getitem__(self, index):

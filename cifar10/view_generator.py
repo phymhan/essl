@@ -56,9 +56,10 @@ class VGGLoss(nn.Module):
             
         return loss
 
-def get_gan_models(device, no_encoder=False):
+def get_gan_models(device, no_encoder=False, g_ckpt='../pretrained/stylegan2-c10_g.pt'):
     print('loading stylegan models...')
-    g_model_path = '../pretrained/stylegan2-c10_g.pt'
+    # g_model_path = '../pretrained/stylegan2-c10_g.pt'
+    g_model_path = g_ckpt
     g_ckpt = torch.load(g_model_path, map_location=device)
     latent_dim = g_ckpt['args'].latent
     generator = Generator(32, latent_dim, 8).to(device)

@@ -77,6 +77,8 @@ def get_default_dataset(which_dataset, train=True, which_transform=None):
 
 def get_transform_list(which_transform, size=32):
     if isinstance(which_transform, str):
+        if which_transform == 'none':
+            return []
         which_transform = which_transform.replace(',', '+').split('+')
     which_transform = [t.lower() for t in which_transform if t]
     transform_list = []
@@ -117,6 +119,9 @@ def get_transforms(args, which_transform):
     size = args.image_size
     if isinstance(which_transform, str):
         which_transform = which_transform.replace(',', '+').split('+')
+        if which_transform == 'none':
+            which_transform = []
+    which_transform = [t.lower() for t in which_transform if t != 'none']
     if 'gan' in which_transform:
         index = which_transform.index('gan')
         pre_transform = get_transform_list(which_transform[:index], size=size)
@@ -484,7 +489,7 @@ def get_viewmaker(args, which_viewmaker='none', branch=None, eval_mode=False):
         viewmaker_kwargs = {}
     elif which_viewmaker == 'gaussian':
         from view_generator import GaussianViewGenerator, get_gan_models
-        gan_gen, _ = get_gan_models('cuda', no_encoder=True)
+        gan_gen, _ = get_gan_models('cuda', no_encoder=True, g_ckpt=args.g_ckpt)
         viewmaker = GaussianViewGenerator(
             gan_generator=gan_gen,
             gan_encoder=None,
@@ -750,14 +755,15 @@ def ssl_loop(args, encoder=None, logger=None):
                     features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
                     loss = criterion(features)
                 elif args.which_loss == 'simclr+pos':
-                    loss = info_nce_loss(z1, z2) / 2 + info_nce_loss(z2, z1) / 2
+                    loss = info_nce_loss(z1, z2, args.temp) / 2 + info_nce_loss(z2, z1, args.temp) / 2
                     z1 = F.normalize(z1, dim=1)
-                    for j in range(args.n_views_gan):
+                    n_pos = len(inputs) - 3
+                    for j in range(n_pos):
                         xj = inputs[3 + j]
                         bj = backbone(xj)
                         zj = projector(bj)
                         zj = F.normalize(zj, dim=1)
-                        loss -= torch.mean(torch.sum(z1 * zj, dim=1)) / args.n_views_gan
+                        loss -= torch.mean(torch.sum(z1 * zj, dim=1)) / n_pos * (args.alpha / args.temp)
                 elif args.which_loss == 'simclr-neg':
                     z1 = F.normalize(z1, dim=1)
                     z2 = F.normalize(z2, dim=1)
@@ -953,6 +959,7 @@ def eval_loop(args, branch, file_to_update, ind=None, logger=None):
             train=True,
             sample_from_mixed=args.sample_from_mixed,
             sample_original=args.sample_original,
+            n_cache=args.n_cache_gan,
         )
         transform_probabilities = np.array([float(p) for p in args.eval_train_transform_probabilities.split(',')])
         transform_probabilities /= transform_probabilities.sum()
@@ -1211,6 +1218,8 @@ if __name__ == '__main__':
     parser.add_argument('--gaussian_noise_std', default=0.2, type=float)
     parser.add_argument('--n_cache_gan', default=8, type=int)
     parser.add_argument('--quick_test', action='store_true')
+    parser.add_argument('--alpha', default=0.5, type=float)
+    parser.add_argument('--g_ckpt', type=str, default='../pretrained/stylegan2-c10_g.pt')
     args = parser.parse_args()
 
     args.log_dir = Path(args.path_dir)  # NOTE: for compatibility
