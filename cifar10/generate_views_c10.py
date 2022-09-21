@@ -78,7 +78,8 @@ if __name__ == '__main__':
     parser.add_argument('--beta2', type=float, default=0.999)
     parser.add_argument('--log_root', type=str, default='logs_view_c10')
     parser.add_argument('--name', type=str, default='test')
-    parser.add_argument('--model_dir', type=str, default='checkpoint')
+    # parser.add_argument('--model_dir', type=str, default='checkpoint')
+    parser.add_argument('--which_model', type=str, default='simclr')
     parser.add_argument('--data_root', type=str, default='../data')
     # parser.add_argument('--load_model', type=str, default='simclr')
     parser.add_argument('--eps1', type=float, default=0.5)
@@ -311,13 +312,22 @@ if __name__ == '__main__':
     if args.no_proj:
         raise NotImplementedError
     else:
-        from main import Branch
-        normalize = partial(F.normalize, dim=1)
-        prefix = 'proj'
-        args_simclr = Config(dim_proj='2048,2048', dim_pred=512, loss='simclr')
-        model = Branch(args_simclr).to(device)
-        saved_dict = torch.load('../pretrained/simclr-cifar10-resnet18-800ep-1.pth')['state_dict']
-        model.load_state_dict(saved_dict, strict=True)
+        if args.which_model == 'simclr':
+            from main import Branch
+            normalize = partial(F.normalize, dim=1)
+            prefix = 'proj'
+            args_simclr = Config(dim_proj='2048,2048', dim_pred=512, loss='simclr')
+            model = Branch(args_simclr).to(device)
+            saved_dict = torch.load('../pretrained/simclr-cifar10-resnet18-800ep-1.pth')['state_dict']
+            model.load_state_dict(saved_dict, strict=True)
+        elif args.which_model == 'simsiam':
+            from simsiam.model_factory import SimSiam
+            normalize = partial(F.normalize, dim=1)
+            prefix = 'simsiam'
+            args_simsiam = Config(feat_dim=2048, num_proj_layers=2, arch='resnet18')
+            model = SimSiam(args_simsiam).to(device)
+            saved_dict = torch.load('cifar10_best.pth')['state_dict']
+            model.load_state_dict(saved_dict, strict=True)
 
     if args.eval:
         print('eval mode')

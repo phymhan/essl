@@ -55,3 +55,10 @@ wandb/
 */*.pdf
 */*/*.pdf
 */*/*/*.pdf
+
+./code/
+
+imagenet/ldm
+code/
+
+*.zip

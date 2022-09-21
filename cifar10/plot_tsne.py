@@ -12,9 +12,10 @@ from einops import rearrange
 import pdb
 st = pdb.set_trace
 
-c10 = True
+c10 = False
 
-M = 5000
+M = 10000
+N = 1000
 np.random.seed(0)
 
 if c10:
@@ -27,6 +28,11 @@ else:
 if not c10:
     data_c10 = data_c100
 
+index2 = np.concatenate([
+    np.random.choice(np.arange(M), N, replace=False),
+    np.random.choice(np.arange(M), N, replace=False)+M,
+    ], axis=0)
+
 tsne = TSNE(n_components=2, perplexity=40, n_iter=300)
 
 dw1 = data_c10['latents'] - data_c10['orig_latents']
@@ -34,9 +40,11 @@ dw1 = rearrange(dw1, 'n b m d -> (n b) (m d)')
 dw2 = data_c10['gauss_latents'] - data_c10['orig_latents']
 dw2 = rearrange(dw2, 'n b m d -> (n b) (m d)')
 index = np.random.choice(np.arange(dw1.shape[0]), M, replace=False)
+
 dw = np.concatenate([dw1.numpy()[index], dw2.numpy()[index]], axis=0)
-N = min(dw1.shape[0], M)
+
 tsne_results_w = tsne.fit_transform(dw)
+tsne_results_w = tsne_results_w[index2]
 
 tsne = TSNE(n_components=2, perplexity=20, n_iter=300)
 
@@ -48,6 +56,7 @@ dz = np.concatenate([dz1.numpy()[index], dz2.numpy()[index]], axis=0)
 
 # N = min(dz1.shape[0], M)
 tsne_results_z = tsne.fit_transform(dz)
+tsne_results_z = tsne_results_z[index2]
 
 # C10
 # data = pd.DataFrame()
@@ -77,7 +86,7 @@ sns.scatterplot(
     # palette=sns.color_palette("hls", 10),
     data=data,
     # legend="full",
-    alpha=0.5,
+    alpha=0.2,
 )
 
 # plt.title('GAN')
@@ -103,7 +112,7 @@ sns.scatterplot(
     # palette=sns.color_palette("hls", 10),
     data=data,
     # legend="full",
-    alpha=0.5,
+    alpha=0.2,
 )
 
 # plt.title('SimCLR')

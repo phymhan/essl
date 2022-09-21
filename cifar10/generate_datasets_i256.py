@@ -51,11 +51,11 @@ class ResNetWrapper(nn.Module):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--image_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--image_size', type=int, default=256)
     parser.add_argument('--truncation', type=float, default=0.7)
     parser.add_argument('--iters_inv', type=int, default=100)
-    parser.add_argument('--iters', type=int, default=1000)
+    parser.add_argument('--iters', type=int, default=500)
     parser.add_argument('--lr_inv', type=float, default=0.01)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd', 'lbfgs'])
@@ -87,90 +87,39 @@ if __name__ == '__main__':
     parser.add_argument('--which_model', type=str, default='simclr')
     args = parser.parse_args()
 
-    utils.fix_seed(args.seed)
-    os.makedirs(Path(args.dest_data_path).parent, exist_ok=True)
-    if args.merge:
-        assert args.n_part is not None
-        views = []
-        for part in range(args.n_part):
-            # dest_data_path = args.dest_data_path.replace('.pkl', f'_{part}.pkl')
-            dest_data_path = args.dest_data_path+f'.part{part}'
-            with open(dest_data_path, 'rb') as f:
-                views.append(pickle.load(f)['views'])
-        views = torch.cat(views, dim=1)  # NOTE: batch is second dim
-        with open(args.dest_data_path, 'wb') as f:
-            pickle.dump({'seed': args.seed, 'n_part': args.n_part, 'n_views': args.n, 'views': views}, f)
-        exit(0)
-    
-    """ expert
-    """
-    if args.expert:
-        # mean = (0.5071, 0.4867, 0.4408)
-        # std = (0.2675, 0.2565, 0.2761)
-        # normalize = T.Normalize(mean=mean, std=std)
-        expert_transform = T.Compose([
-            T.Normalize([-1, -1, -1], [2, 2, 2]),
-            T.RandomResizedCrop(size=32, scale=(0.2, 1.)),
-            T.RandomHorizontalFlip(p=0.5),
-            T.RandomApply([
-                T.ColorJitter(0.4, 0.4, 0.4, 0.1)
-            ], p=0.8),
-            T.RandomGrayscale(p=0.2),
-            # T.ToTensor(),
-            T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ])
-        n = args.n
-        batch_size = args.batch_size
-        with open(args.data_path, 'rb') as f:
-            data = pickle.load(f)
-        images = data['images']
-        labels = data['labels']
-        print('[data loaded]')
-
-        index = np.arange(len(labels))
-        views_image = []
-        for i in track(range(int(np.ceil(len(index) / batch_size)))):
-            inds = index[i * batch_size:(i + 1) * batch_size]
-            bsz = len(inds)
-            imgs = images[inds]
-            imgs_aug = [expert_transform(imgs) for _ in range(n)]
-            imgs_aug = torch.stack(imgs_aug, dim=1)
-            views_image.append(imgs_aug)
-
-        views_image = torch.cat(views_image, dim=0)
-        views = {'n_views': n}
-        views['views'] = views_image.transpose(0, 1)  # [n_views, B, 3, H, W]
-        with open(os.path.join(args.dest_data_path), 'wb') as f:
-            pickle.dump(views, f)
-        exit(0)
+    # utils.fix_seed(args.seed)
+    # os.makedirs(Path(args.dest_data_path).parent, exist_ok=True)
 
     # name = args.name
     args.clamp = True
     
     device = 'cuda'
     image_size = args.image_size
-    tol = 1e-3
+    tol = 1e-6
 
-    g_model_path = '../pretrained/stylegan2-c10_g.pt'
-    g_ckpt = torch.load(g_model_path, map_location=device)
+    # g_model_path = '../pretrained/stylegan2-c10_g.pt'
+    # g_ckpt = torch.load(g_model_path, map_location=device)
 
-    latent_dim = g_ckpt['args'].latent
+    # latent_dim = g_ckpt['args'].latent
+    latent_dim = 512
 
     generator = Generator(image_size, latent_dim, 8).to(device)
-    generator.load_state_dict(g_ckpt["g_ema"], strict=False)
+    # generator.load_state_dict(g_ckpt["g_ema"], strict=False)
     generator.eval()
     print('[generator loaded]')
 
-    e_model_path = '../pretrained/stylegan2-c10_e.pt'
-    e_ckpt = torch.load(e_model_path, map_location=device)
+    # e_model_path = '../pretrained/stylegan2-c10_e.pt'
+    # e_ckpt = torch.load(e_model_path, map_location=device)
 
-    encoder = Encoder(image_size, latent_dim).to(device)
-    encoder.load_state_dict(e_ckpt['e'])
-    encoder.eval()
-    print('[encoder loaded]')
+    # encoder = Encoder(image_size, latent_dim).to(device)
+    # # encoder.load_state_dict(e_ckpt['e'])
+    # encoder.eval()
+    # print('[encoder loaded]')
 
-    truncation = args.truncation
-    trunc = generator.mean_latent(4096).detach().clone()
+    # truncation = args.truncation
+    # trunc = generator.mean_latent(4096).detach().clone()
+    truncation = 1
+    trunc = None
 
     batch_size = args.batch_size
 
@@ -186,7 +135,7 @@ if __name__ == '__main__':
         args.dest_data_path = args.dest_data_path+f'.part{args.part}'
     else:
         seed = args.seed
-    utils.fix_seed(seed)
+    # utils.fix_seed(seed)
 
     vgg_loss = VGGLoss(device)
     eps1 = args.eps1
@@ -232,7 +181,7 @@ if __name__ == '__main__':
             model = SimSiam(args_simsiam).to(device)
             saved_dict = torch.load('cifar10_best.pth')['state_dict']
             model.load_state_dict(saved_dict, strict=True)
-    
+
     # ========== eval ==========
     model.eval()  # NOTE: eval mode
     # ========== eval ==========
@@ -247,7 +196,9 @@ if __name__ == '__main__':
 
     toggle_grad(model, False)
     toggle_grad(generator, False)
-    toggle_grad(encoder, False)
+    # toggle_grad(encoder, False)
+
+    image_transform = T.Resize(image_size)
 
     # load data
     assert os.path.exists(args.data_path)
@@ -276,6 +227,11 @@ if __name__ == '__main__':
         imgs = images[inds].clone()
         # lbls = [labels[ind] for ind in inds]
         z1 = latents[inds].clone()
+
+        # NOTE: hahaha
+        imgs = image_transform(imgs)
+        z1 = z1[:,0,:]
+
         imgs = imgs.to(device)
         z1 = z1.to(device)
 
@@ -363,14 +319,14 @@ if __name__ == '__main__':
             if args.clamp:
                 imgs_gen = torch.clamp(imgs_gen, -1, 1)
         imgs_gen = imgs_gen.view(bsz, n, 3, image_size, image_size)
-        z = rearrange(z, '(b n) m d -> b n m d', b = bsz, n = n)
+        # z = rearrange(z, '(b n) m d -> b n m d', b = bsz, n = n)
         views_latent.append(z.detach().cpu().data)
         views_image.append(imgs_gen.detach().cpu().data)
 
-    views_image = torch.cat(views_image, dim=0)
-    views_latent = torch.cat(views_latent, dim=0)
-    views = {'n_views': n}
-    views['views'] = views_image.transpose(0, 1)  # [n_views, B, 3, H, W]
-    views['latents'] = views_latent.transpose(0, 1)  # [n_views, B, M, D]
-    with open(os.path.join(args.dest_data_path), 'wb') as f:
-        pickle.dump(views, f)
+    # views_image = torch.cat(views_image, dim=0)
+    # views_latent = torch.cat(views_latent, dim=0)
+    # views = {'n_views': n}
+    # views['views'] = views_image.transpose(0, 1)  # [n_views, B, 3, H, W]
+    # views['latents'] = views_latent.transpose(0, 1)  # [n_views, B, M, D]
+    # with open(os.path.join(args.dest_data_path), 'wb') as f:
+    #     pickle.dump(views, f)

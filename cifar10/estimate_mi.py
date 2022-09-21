@@ -38,6 +38,9 @@ if __name__ == '__main__':
     parser.add_argument('--which_pair', type=str, default='0,1')
     parser.add_argument('--uint8', action='store_true')
     parser.add_argument('--mi_model_name', type=str, default='mine')
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--flip', action='store_true')
+    parser.add_argument('--transform2', type=str, default='expert')
     args = parser.parse_args()
 
     device = 'cuda'
@@ -121,6 +124,11 @@ if __name__ == '__main__':
     normalize = T.Normalize(mean=mean, std=std)
     # single_transform = T.Compose([T.ToTensor(), normalize])
     single_transform = T.Compose([T.ToTensor(), normalize])
+    small_transform = T.Compose([
+        T.RandomResizedCrop(size=32, scale=(0.9, 1.), ratio=(0.9, 1.1)),
+        T.RandomHorizontalFlip(),
+        T.Normalize(mean=mean, std=std),
+    ])
     
     model.eval()  # NOTE
 
@@ -147,15 +155,21 @@ if __name__ == '__main__':
     #     n_views=2,  # NOTE: we use 0, 3, 4
     #     train=True,
     # )
+    if args.transform2 == 'expert':
+        transform2 = expert_transform
+    elif args.transform2 == 'small':
+        transform2 = small_transform
+    elif args.transform2 == 'flip':
+        transform2 = T.Compose([normalize, T.RandomHorizontalFlip(0.5)])
     train_dataset = MultiViewDataset(
         data_path=args.data_path,
         latent_path=args.latent_path,
         view_paths=[args.view_path],
-        transform0=normalize,
+        transform0=T.Compose([normalize, T.RandomHorizontalFlip()]) if args.flip else normalize,
         transform1=expert_transform,
-        transform2=None,
+        transform2=transform2,
         transform3=normalize,
-        n_views=1,  # NOTE: we use 0, 1, 3
+        n_views=2,  # NOTE: we use 0, 1, 3
         train=True,
         uint8=args.uint8,
     )
@@ -177,7 +191,7 @@ if __name__ == '__main__':
     estimator.train()
 
     # with torch.no_grad():
-    for e in tqdm(range(10)):
+    for e in tqdm(range(args.epochs)):
         mi_est_values = []
         pbar = tqdm(train_loader)
         for imgs, _, _ in pbar:
@@ -186,6 +200,15 @@ if __name__ == '__main__':
             if args.which_pair == '0,1':
                 batch_x = imgs[0].to(device)
                 batch_y = imgs[1].to(device)
+            # elif args.which_pair == '0,0':
+            #     batch_x = imgs[0].to(device)
+            #     batch_y = imgs[0].to(device)
+            elif args.which_pair == '0,2':
+                batch_x = imgs[0].to(device)
+                batch_y = imgs[2].to(device)
+            elif args.which_pair == '1,2':
+                batch_x = imgs[1].to(device)
+                batch_y = imgs[2].to(device)
             elif args.which_pair == '0,3':
                 batch_x = imgs[0].to(device)
                 batch_y = imgs[3].to(device)
@@ -195,6 +218,9 @@ if __name__ == '__main__':
             elif args.which_pair == '3,1':
                 batch_x = imgs[3].to(device)
                 batch_y = imgs[1].to(device)
+            elif args.which_pair == '3,4':
+                batch_x = imgs[3].to(device)
+                batch_y = imgs[4].to(device)
 
             estimator.eval()
             m = estimator(batch_x, batch_y).item()
@@ -217,6 +243,15 @@ if __name__ == '__main__':
         if args.which_pair == '0,1':
             batch_x = imgs[0].to(device)
             batch_y = imgs[1].to(device)
+        # elif args.which_pair == '0,0':
+        #     batch_x = imgs[0].to(device)
+        #     batch_y = imgs[0].to(device)
+        elif args.which_pair == '0,2':
+            batch_x = imgs[0].to(device)
+            batch_y = imgs[2].to(device)
+        elif args.which_pair == '1,2':
+            batch_x = imgs[1].to(device)
+            batch_y = imgs[2].to(device)
         elif args.which_pair == '0,3':
             batch_x = imgs[0].to(device)
             batch_y = imgs[3].to(device)
@@ -226,6 +261,9 @@ if __name__ == '__main__':
         elif args.which_pair == '3,1':
             batch_x = imgs[3].to(device)
             batch_y = imgs[1].to(device)
+        elif args.which_pair == '3,4':
+            batch_x = imgs[3].to(device)
+            batch_y = imgs[4].to(device)
 
         estimator.eval()
         m = estimator(batch_x, batch_y).item()

@@ -264,3 +264,35 @@ def instantiate_from_config(config):
     if not "target" in config:
         raise KeyError("Expected key `target` to instantiate.")
     return get_obj_from_str(config["target"])(**config.get("params", dict()))
+
+def instantiate_from_config(config):
+    if not "target" in config:
+        raise KeyError("Expected key `target` to instantiate.")
+    return get_obj_from_str(config["target"])(**config.get("params", dict()))
+
+def encode(vqgan, x):
+    h = vqgan.encoder(x)
+    z = vqgan.quant_conv(h)
+    z_q, _, [_, _, indices] = vqgan.quantize(z)
+    return z_q, z, indices
+
+def decode(vqgan, z_q):
+    quant = vqgan.post_quant_conv(z_q)
+    x = vqgan.decoder(quant)
+    return x
+
+def decode_z(vqgan, z):
+    z_q, _, info = vqgan.quantize(z)
+    quant = vqgan.post_quant_conv(z_q)
+    x = vqgan.decoder(quant)
+    return x
+
+def encode_kl(vqgan, x):
+    post = vqgan.encode(x)
+    z = post.sample()
+    z_q = z
+    return z_q, z, post
+
+def decode_kl(vqgan, z_q):
+    x = vqgan.decode(z_q)
+    return x

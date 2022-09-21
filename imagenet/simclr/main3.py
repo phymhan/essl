@@ -14,14 +14,16 @@ from torch import nn, optim
 import torch
 import torchvision
 import torchvision.transforms as transforms
+import torch.nn.functional as F
 
 from utils import gather_from_all, GaussianBlur, Solarization
-
+import pdb
+st = pdb.set_trace
 
 parser = argparse.ArgumentParser(description='RotNet Training')
 parser.add_argument('--data', type=Path, metavar='DIR',
                     help='path to dataset')
-parser.add_argument('--workers', default=8, type=int, metavar='N',
+parser.add_argument('--workers', default=16, type=int, metavar='N',
                     help='number of data loader workers')
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
@@ -35,10 +37,17 @@ parser.add_argument('--print-freq', default=10, type=int, metavar='N',
                     help='print frequency')
 parser.add_argument('--checkpoint-dir', type=Path,
                     metavar='DIR', help='path to checkpoint directory')
-parser.add_argument('--rotation', default=0.4, type=float,
+parser.add_argument('--rotation', default=0., type=float,
                     help="coefficient of rotation loss")
 parser.add_argument('--scale', default='0.05,0.14', type=str)
-
+parser.add_argument('--debug', action='store_true')
+parser.add_argument('--add_generated_view', action='store_true')
+parser.add_argument('--view', type=Path, help='path to view dataset')
+parser.add_argument('--which_loss', type=str, default='infonce')
+parser.add_argument('--temperature', default=0.2, type=float,
+                    help="temperature of InfoNCE loss")
+parser.add_argument('--alpha', default=0.2, type=float,
+                    help="Coef of inner-product")
 
 def main():
     args = parser.parse_args()
@@ -56,7 +65,11 @@ def main():
         args.rank = 0
         args.dist_url = f'tcp://localhost:{random.randrange(49152, 65535)}'
         args.world_size = args.ngpus_per_node
-    torch.multiprocessing.spawn(main_worker, (args,), args.ngpus_per_node)
+    if args.debug:
+        args.workers = 0
+        main_worker(0, args)
+    else:
+        torch.multiprocessing.spawn(main_worker, (args,), args.ngpus_per_node)
 
 
 def main_worker(gpu, args):
@@ -93,7 +106,19 @@ def main_worker(gpu, args):
     else:
         start_epoch = 0
 
-    dataset = torchvision.datasets.ImageFolder(args.data / 'train', Transform(args))
+    if args.add_generated_view:
+        from utils_data3 import MultiViewDataset
+        single_transform = transforms.Compose([
+            transforms.RandomResizedCrop(224, interpolation=Image.BICUBIC),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])
+        ])
+        dataset = torchvision.datasets.ImageFolder(args.data / 'train', Transform2(args))
+        dataset = MultiViewDataset(dataset, args.view, single_transform)
+    else:
+        dataset = torchvision.datasets.ImageFolder(args.data / 'train', Transform(args))
     sampler = torch.utils.data.distributed.DistributedSampler(dataset, drop_last=True)
     assert args.batch_size % args.world_size == 0
     per_device_batch_size = args.batch_size // args.world_size
@@ -118,7 +143,27 @@ def main_worker(gpu, args):
             lr = adjust_learning_rate(args, optimizer, loader, step)
             optimizer.zero_grad()
             with torch.cuda.amp.autocast():
-                loss, acc = model.forward(y1, y2, labels)
+                if args.which_loss == 'infonce':
+                    loss, acc = model.forward(y1, y2, labels,
+                        which_loss=args.which_loss, temp=args.temperature)
+                
+                elif args.which_loss == 'infonce+diag':
+                    loss, acc, z1, z2 = model.forward(y1, y2, labels,
+                        which_loss=args.which_loss, temp=args.temperature)
+                    z3 = model.module.forward_projection(y3.cuda(gpu, non_blocking=True))
+                    inner_prod = torch.mean(torch.sum(z1 * z3, dim=1)) / 2 + torch.mean(torch.sum(z2 * z3, dim=1)) / 2
+                    loss = loss - args.alpha * inner_prod / args.temperature
+                
+                elif args.which_loss == 'supcon':
+                    loss, acc = model.forward(y1, y2, labels,
+                        which_loss=args.which_loss, temp=args.temperature)
+                    x = torch.cat([y1, y2, y3.cuda(gpu, non_blocking=True)], dim=0)
+                    z = model.module.forward_projection(x)
+                    z1, z2, z3 = torch.split(z, y1.shape[0], dim=0)
+                    loss += supcon_loss(z1, z2, z3, temperature=args.temperature, base_temperature=1.)
+                
+                else:
+                    raise NotImplementedError
 
                 if args.rotation:
                     logits = model.module.forward_rotation(rotated_images)
@@ -142,7 +187,7 @@ def main_worker(gpu, args):
             state = dict(epoch=epoch + 1, model=model.state_dict(),
                          optimizer=optimizer.state_dict())
             torch.save(state, args.checkpoint_dir / 'checkpoint.pth')
-        
+
     if args.rank == 0:
         # save final model
         torch.save(dict(backbone=model.module.backbone.state_dict(),
@@ -199,17 +244,18 @@ class SimCLR(nn.Module):
                                                     nn.LayerNorm(128),
                                                     nn.Linear(128, 4))  # output layer
 
-
-    def forward(self, y1, y2, labels):
+    def forward(self, y1, y2, labels, which_loss='infonce', temp=0.2):
         r1 = self.backbone(y1)
         r2 = self.backbone(y2)
 
-        # projoection
-        z1 = self.projector(r1)
-        z2 = self.projector(r2)
+        if which_loss in ['infonce', 'infonce+diag']:
+            # projoection
+            z1 = self.projector(r1)
+            z2 = self.projector(r2)
 
-
-        loss = infoNCE(z1, z2) / 2 + infoNCE(z2, z1) / 2
+            loss = infoNCE(z1, z2, temp) / 2 + infoNCE(z2, z1, temp) / 2
+        else:
+            loss = 0.
 
         logits = self.online_head(r1.detach())
         cls_loss = torch.nn.functional.cross_entropy(logits, labels)
@@ -217,7 +263,14 @@ class SimCLR(nn.Module):
 
         loss = loss + cls_loss
 
+        if which_loss == 'infonce+diag':
+            return loss, acc, F.normalize(z1, dim=1), F.normalize(z2, dim=1)
         return loss, acc
+
+    def forward_projection(self, x):
+        r = self.backbone(x)
+        z = self.projector(r)
+        return F.normalize(z, dim=1)
 
     def forward_rotation(self, x):
         b = self.backbone(x)
@@ -236,6 +289,38 @@ def infoNCE(nn, p, temperature=0.2):
     n = p.shape[0]
     labels = torch.arange(0, n, dtype=torch.long).cuda()
     loss = torch.nn.functional.cross_entropy(logits, labels)
+    return loss
+
+
+def supcon_loss(z1, z2, z3, temperature=0.07, base_temperature=0.07):
+    """
+    full simclr loss, append positive by supcon loss
+    """
+    bsz = z1.shape[0]
+    bsz3 = bsz * 3
+
+    labels = torch.cat([torch.arange(bsz) for i in range(3)], dim=0)
+    labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float().cuda()
+
+    z_anchor = torch.cat([z1, z2, z3], dim=0)
+    z_contra = z_anchor
+
+    logits = z_anchor @ z_contra.T
+    mask = torch.eye(bsz3, dtype=torch.bool).cuda()
+    labels = labels[~mask].view(bsz3, -1)
+    logits = logits[~mask].view(bsz3, -1)
+    positives = logits[labels.bool()].view(bsz3, -1)
+    negatives = logits[~labels.bool()].view(bsz3, -1)
+
+    logits = torch.cat([positives, negatives], dim=1)
+    logits /= temperature
+
+    label0 = torch.zeros(bsz3, dtype=torch.long).cuda()
+    loss0 = torch.nn.functional.cross_entropy(logits, label0)
+    label1 = torch.ones(bsz3, dtype=torch.long).cuda()
+    loss1 = torch.nn.functional.cross_entropy(logits, label1)
+    loss = (loss0 + loss1) / 2 * (temperature / base_temperature)
+
     return loss
 
 
@@ -335,6 +420,51 @@ class Transform:
         y3 = self.transform_rotation(x)
         return y1, y2, y3
 
+class Transform2:
+    def __init__(self, args):
+        self.transform = transforms.Compose([
+            transforms.RandomResizedCrop(224, interpolation=Image.BICUBIC),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomApply(
+                [transforms.ColorJitter(brightness=0.4, contrast=0.4,
+                                        saturation=0.2, hue=0.1)],
+                p=0.8
+            ),
+            transforms.RandomGrayscale(p=0.2),
+            GaussianBlur(p=1.0),
+            Solarization(p=0.0),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])
+        ])
+        self.transform_prime = transforms.Compose([
+            transforms.RandomResizedCrop(224, interpolation=Image.BICUBIC),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomApply(
+                [transforms.ColorJitter(brightness=0.4, contrast=0.4,
+                                        saturation=0.2, hue=0.1)],
+                p=0.8
+            ),
+            transforms.RandomGrayscale(p=0.2),
+            GaussianBlur(p=0.1),
+            Solarization(p=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])
+        ])
+        # self.transform3 = transforms.Compose([
+        #     transforms.RandomResizedCrop(224, interpolation=Image.BICUBIC),
+        #     transforms.RandomHorizontalFlip(p=0.5),
+        #     transforms.ToTensor(),
+        #     transforms.Normalize(mean=[0.485, 0.456, 0.406],
+        #                         std=[0.229, 0.224, 0.225])
+        # ])
+
+    def __call__(self, x):
+        y1 = self.transform(x)
+        y2 = self.transform_prime(x)
+        # y3 = self.transform3(x)
+        return y1, y2
 
 # rotation
 def rotate_images(images, gpu, single=False):

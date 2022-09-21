@@ -832,6 +832,31 @@ def ssl_loop(args, encoder=None, logger=None):
                     p1 = predictor(z1)
                     p2 = predictor(z2)
                     loss = negative_cosine_similarity_loss(p1, z2) / 2 + negative_cosine_similarity_loss(p2, z1) / 2
+                elif args.which_loss == 'simsiam+pos':
+                    p1 = predictor(z1)
+                    p2 = predictor(z2)
+                    loss = negative_cosine_similarity_loss(p1, z2) / 2 + negative_cosine_similarity_loss(p2, z1) / 2
+                    z1 = F.normalize(z1, dim=1)
+                    n_pos = len(inputs) - 3
+                    for j in range(n_pos):
+                        xj = inputs[3 + j]
+                        bj = backbone(xj)
+                        zj = projector(bj)
+                        zj = F.normalize(zj, dim=1)
+                        loss -= torch.mean(torch.sum(z1 * zj, dim=1)) / n_pos * args.alpha
+                elif args.which_loss == 'simsiam+pos_detachz':
+                    p1 = predictor(z1)
+                    p2 = predictor(z2)
+                    loss = negative_cosine_similarity_loss(p1, z2) / 2 + negative_cosine_similarity_loss(p2, z1) / 2
+                    # z1 = F.normalize(z1, dim=1)
+                    n_pos = len(inputs) - 3
+                    for j in range(n_pos):
+                        xj = inputs[3 + j]
+                        bj = backbone(xj)
+                        zj = projector(bj)
+                        pj = predictor(zj)
+                        loss += args.alpha * (
+                            negative_cosine_similarity_loss(pj, z1) / 2 + negative_cosine_similarity_loss(pj, z2) / 2)
                 else:
                     raise
 
@@ -1177,7 +1202,8 @@ if __name__ == '__main__':
     parser.add_argument('--which_loss', type=str, default='simclr',
         choices=['simclr', 'simsiam', 'simclr+pos', 'simclr+supcon',
             'simclr_all', 'simclr_supcon', 'simclr-neg', 'simclr+pos-neg',
-            'simclr_3_views', 'simclr-rep_vg4+a2-diag'],
+            'simclr_3_views', 'simclr-rep_vg4+a2-diag',
+            'simsiam+pos', 'simsiam+pos_detachz', 'simsiam+pos_detachp'],
         help='--loss is kept for compatibility with the original code')
     parser.add_argument('--code_to_save', type=str, default='utils_data.py,view_generator.py',
         help='source files to save, note that main2.py will be saved in print_args')

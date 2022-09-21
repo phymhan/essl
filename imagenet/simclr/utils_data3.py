@@ -492,3 +492,30 @@ class MultiViewImageFolder(data.Dataset):
     tmp = '    Transform_3 (if any): '
     fmt_str += '{0}{1}\n'.format(tmp, self.transform3.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
     return fmt_str
+
+
+from typing import Any, Callable, cast, Dict, List, Optional, Tuple
+from typing import Union
+import torchvision
+import pdb
+st = pdb.set_trace
+
+# class MultiViewDataset(torchvision.datasets.DatasetFolder):
+class MultiViewDataset(torch.utils.data.Dataset):
+    def __init__(self, img_dataset, view_dataset_root, view_transform=None):
+      self.img_dataset = img_dataset
+      self.view_dataset_root = view_dataset_root
+      self.view_transform = view_transform
+      self.loader = img_dataset.loader
+
+    def __getitem__(self, index):
+      (img1, img2), label = self.img_dataset[index]
+      img_path, _ = self.img_dataset.imgs[index]
+      view_path = os.path.join(self.view_dataset_root, *img_path.split('/')[-2:])
+      sample = self.loader(view_path)
+      if self.view_transform is not None:
+        sample = self.view_transform(sample)
+      return (img1, img2, sample), label
+
+    def __len__(self):
+      return len(self.img_dataset)

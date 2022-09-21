@@ -73,7 +73,7 @@ if __name__ == '__main__':
     parser.add_argument('--no_proj', action='store_true')
     parser.add_argument('--objective', type=str, default='norm', choices=['norm', 'cosine'])
     parser.add_argument('--loss_type', type=str, default='l2', choices=['l2', 'l1', 'hinge'])
-    parser.add_argument('--method', type=str, default='gd', choices=['gd', 'fgsm', 'vat'])
+    parser.add_argument('--method', type=str, default='gd', choices=['gd', 'fgsm', 'vat', 'vg2'])
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--clamp', action='store_true')
     parser.add_argument('--g_ckpt', type=str, default='/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0401_gan_t64/weight/latest.pt')
@@ -352,6 +352,9 @@ if __name__ == '__main__':
             loss.backward()
             z_delta = z.grad.data.sign()
             z = z - args.lr * z_delta
+            done = True
+        elif args.method == 'vg2':
+            z = z + args.eps1 * torch.randn_like(z)
             done = True
         
         if args.objective == 'norm':
