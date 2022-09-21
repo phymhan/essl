@@ -151,6 +151,7 @@ def main_worker(gpu, args):
                     loss, acc, z1, z2 = model.forward(y1, y2, labels,
                         which_loss=args.which_loss, temp=args.temperature)
                     z3 = model.module.forward_projection(y3.cuda(gpu, non_blocking=True))
+                    z3 = gather_from_all(z3)
                     inner_prod = torch.mean(torch.sum(z1 * z3, dim=1)) / 2 + torch.mean(torch.sum(z2 * z3, dim=1)) / 2
                     loss = loss - args.alpha * inner_prod / args.temperature
                 
@@ -159,6 +160,7 @@ def main_worker(gpu, args):
                         which_loss=args.which_loss, temp=args.temperature)
                     x = torch.cat([y1, y2, y3.cuda(gpu, non_blocking=True)], dim=0)
                     z = model.module.forward_projection(x)
+                    z = gather_from_all(z)
                     z1, z2, z3 = torch.split(z, y1.shape[0], dim=0)
                     loss += supcon_loss(z1, z2, z3, temperature=args.temperature, base_temperature=1.)
                 
@@ -169,7 +171,7 @@ def main_worker(gpu, args):
                     logits = model.module.forward_rotation(rotated_images)
                     rot_loss = torch.nn.functional.cross_entropy(logits, rotated_labels)
                     loss += args.rotation * rot_loss
-        
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
