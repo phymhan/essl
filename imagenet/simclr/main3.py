@@ -161,7 +161,7 @@ def main_worker(gpu, args):
                     x = torch.cat([y1, y2, y3.cuda(gpu, non_blocking=True)], dim=0)
                     z = model.module.forward_projection(x)
                     z = gather_from_all(z)
-                    z1, z2, z3 = torch.split(z, y1.shape[0], dim=0)
+                    z1, z2, z3 = torch.chunk(z, 3, dim=0)
                     loss += supcon_loss(z1, z2, z3, temperature=args.temperature, base_temperature=1.)
                 
                 else:
@@ -255,6 +255,9 @@ class SimCLR(nn.Module):
             z1 = self.projector(r1)
             z2 = self.projector(r2)
 
+            z1 = gather_from_all(z1)
+            z2 = gather_from_all(z2)
+
             loss = infoNCE(z1, z2, temp) / 2 + infoNCE(z2, z1, temp) / 2
         else:
             loss = 0.
@@ -284,8 +287,8 @@ class SimCLR(nn.Module):
 def infoNCE(nn, p, temperature=0.2):
     nn = torch.nn.functional.normalize(nn, dim=1)
     p = torch.nn.functional.normalize(p, dim=1)
-    nn = gather_from_all(nn)
-    p = gather_from_all(p)
+    # nn = gather_from_all(nn)
+    # p = gather_from_all(p)
     logits = nn @ p.T
     logits /= temperature
     n = p.shape[0]
