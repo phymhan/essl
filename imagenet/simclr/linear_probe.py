@@ -38,6 +38,7 @@ parser.add_argument('--weight-decay', default=1e-6, type=float, metavar='W',
 parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
 parser.add_argument('--debug', action='store_true')
+parser.add_argument('--convert_ckpt', action='store_true')
 
 
 def exclude_bias_and_norm(p):
@@ -73,6 +74,13 @@ def main_worker(gpu, args):
     model = models.resnet50().cuda(gpu)
 
     state_dict = torch.load(args.pretrained, map_location='cpu')
+    if args.convert_ckpt:
+        backbone_state_dict = {}
+        for k, v in state_dict['model'].items():
+            if k.startswith('module.backbone.'):
+                k = k.replace("module.backbone.", "")
+                backbone_state_dict[k] = v
+        state_dict = {'backbone': backbone_state_dict}
     missing_keys, unexpected_keys = model.load_state_dict(state_dict["backbone"], strict=False)
     assert missing_keys == ['fc.weight', 'fc.bias'] and unexpected_keys == []
     model.fc.weight.data.normal_(mean=0.0, std=0.01)
