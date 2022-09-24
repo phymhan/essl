@@ -12,6 +12,10 @@ from torchvision import models, datasets, transforms
 import torch
 import torchvision
 
+import pdb
+st = pdb.set_trace
+
+
 parser = argparse.ArgumentParser(description='Evaluate resnet50 features on ImageNet')
 parser.add_argument('--data', type=Path, metavar='DIR',
                     help='path to dataset')
@@ -37,6 +41,7 @@ parser.add_argument('--weight-decay', default=1e-6, type=float, metavar='W',
                     help='weight decay')
 parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
+parser.add_argument('--view', type=Path, help='path to view dataset')
 parser.add_argument('--debug', action='store_true')
 
 
@@ -105,12 +110,23 @@ def main_worker(gpu, args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
+    from utils_data3 import MultiViewDatasetLinearProbe
+    from PIL import Image
     train_dataset = datasets.ImageFolder(traindir, transforms.Compose([
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
         ]))
+    single_transform = transforms.Compose([
+        transforms.RandomResizedCrop(224, interpolation=Image.BICUBIC),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225])
+    ])
+    train_dataset = MultiViewDatasetLinearProbe(train_dataset, args.view, single_transform,
+        probabilities=[2, 1])
     val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
             transforms.Resize(256),
             transforms.CenterCrop(224),

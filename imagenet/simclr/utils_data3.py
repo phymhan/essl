@@ -519,3 +519,31 @@ class MultiViewDataset(torch.utils.data.Dataset):
 
     def __len__(self):
       return len(self.img_dataset)
+
+
+class MultiViewDatasetLinearProbe(torch.utils.data.Dataset):
+    def __init__(self, img_dataset, view_dataset_root, view_transform=None, probabilities=[1, 0]):
+      self.img_dataset = img_dataset
+      self.view_dataset_root = view_dataset_root
+      self.view_transform = view_transform
+      self.loader = img_dataset.loader
+      self.probabilities = np.array(probabilities)
+      self.probabilities = self.probabilities / self.probabilities.sum()
+
+    def __getitem__(self, index):
+      which_view = np.random.choice([0, 1], p=self.probabilities)
+      if which_view == 0:
+        img1, label = self.img_dataset[index]
+        return img1, label
+      elif which_view == 1:
+        img_path, label = self.img_dataset.imgs[index]
+        view_path = os.path.join(self.view_dataset_root, *img_path.split('/')[-2:])
+        sample = self.loader(view_path)
+        if self.view_transform is not None:
+          sample = self.view_transform(sample)
+        return sample, label
+      else:
+        raise ValueError
+
+    def __len__(self):
+      return len(self.img_dataset)
