@@ -188,7 +188,7 @@ def main_worker(gpu, args):
             # save checkpoint
             state = dict(epoch=epoch + 1, model=model.state_dict(),
                          optimizer=optimizer.state_dict())
-            torch.save(state, args.checkpoint_dir / 'checkpoint.pth')
+            torch.save(state, args.checkpoint_dir / f'checkpoint_ep={epoch+1}.pth')
 
     if args.rank == 0:
         # save final model
