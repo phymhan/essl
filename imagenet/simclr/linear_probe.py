@@ -39,6 +39,7 @@ parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
 parser.add_argument('--debug', action='store_true')
 parser.add_argument('--convert_ckpt', action='store_true')
+parser.add_argument('--log_file', type=str, default='log_linear_probe.txt')
 
 
 def exclude_bias_and_norm(p):
@@ -165,6 +166,9 @@ def main_worker(gpu, args):
                                  lr_classifier=lr_classifier, loss=loss.item(),
                                  time=int(time.time() - start_time))
                     print(json.dumps(stats))
+                    if args.rank == 0:
+                        with open(args.log_file, 'a+') as f:
+                            f.write(json.dumps(stats)+'\n')
 
         # evaluate
         model.eval()
@@ -181,6 +185,8 @@ def main_worker(gpu, args):
             best_acc.top5 = max(best_acc.top5, top5.avg)
             stats = dict(epoch=epoch, acc1=top1.avg, acc5=top5.avg, best_acc1=best_acc.top1, best_acc5=best_acc.top5)
             print(json.dumps(stats))
+            with open(args.log_file, 'a+') as f:
+                f.write(json.dumps(stats)+'\n')
 
 
 class AverageMeter(object):

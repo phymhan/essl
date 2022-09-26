@@ -265,7 +265,7 @@ if __name__ == '__main__':
             batch_x = imgs[3].to(device)
             batch_y = imgs[4].to(device)
 
-        estimator.eval()
+        # estimator.eval()
         m = estimator(batch_x, batch_y).item()
         mi_est_values.append(m)
         # pbar.set_description('MI Estimator: %.4f' % m)

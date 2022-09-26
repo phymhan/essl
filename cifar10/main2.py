@@ -754,6 +754,17 @@ def ssl_loop(args, encoder=None, logger=None):
                     f1, f2 = torch.split(z, args.bsz, dim=0)
                     features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
                     loss = criterion(features)
+                elif args.which_loss == 'simclr+diag':
+                    # NOTE we should concat inputs
+                    x3 = inputs[3]
+                    x = torch.cat([x1, x2, x3])
+                    b = backbone(x)
+                    z = projector(b)
+                    z = F.normalize(z, dim=1)
+                    z1, z2, z3 = torch.split(z, args.bsz, dim=0)
+                    loss = simclr_loss(z1, z2, args.temp, args.base_temp)
+                    inner_prod = torch.mean(torch.sum(z1 * z3, dim=1)) / 2 + torch.mean(torch.sum(z2 * z3, dim=1)) / 2
+                    loss -= inner_prod * (args.alpha / args.temp)
                 elif args.which_loss == 'simclr+pos':
                     loss = info_nce_loss(z1, z2, args.temp) / 2 + info_nce_loss(z2, z1, args.temp) / 2
                     z1 = F.normalize(z1, dim=1)
@@ -1203,7 +1214,7 @@ if __name__ == '__main__':
         choices=['simclr', 'simsiam', 'simclr+pos', 'simclr+supcon',
             'simclr_all', 'simclr_supcon', 'simclr-neg', 'simclr+pos-neg',
             'simclr_3_views', 'simclr-rep_vg4+a2-diag',
-            'simsiam+pos', 'simsiam+pos_detachz', 'simsiam+pos_detachp'],
+            'simsiam+pos', 'simsiam+pos_detachz', 'simsiam+pos_detachp', 'simclr+diag'],
         help='--loss is kept for compatibility with the original code')
     parser.add_argument('--code_to_save', type=str, default='utils_data.py,view_generator.py',
         help='source files to save, note that main2.py will be saved in print_args')

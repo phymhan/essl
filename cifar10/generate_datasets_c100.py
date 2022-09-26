@@ -61,7 +61,7 @@ if __name__ == '__main__':
     parser.add_argument('--add_noise', action='store_true')
     parser.add_argument('--start_from_orig', action='store_true')
     parser.add_argument('--eval', action='store_true')
-    parser.add_argument('--g_ckpt', type=str, default='/research/cbim/medical/lh599/active/stylegan2-pytorch/logs/0423_gan_c100/weight/220000.pt')
+    parser.add_argument('--g_ckpt', type=str, default='/research/cbim/medical/lh599/code/stylegan2-pytorch/logs/0423_gan_c100/weight/220000.pt')
     parser.add_argument('--model_path', type=str, default='../../SupContrast/logs/0428_c100_bs=512_base/weights/last.pth')
     parser.add_argument('--tol', type=float, default=1e-3)
     parser.add_argument('--latent_dim', type=int, default=512)
@@ -69,6 +69,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_latent', type=int, default=8)
     parser.add_argument('--expert', action='store_true')
     parser.add_argument('--uint8', action='store_true')
+    parser.add_argument('--bubble', action='store_true')
     args = parser.parse_args()
 
     # utils.fix_seed(args.seed)
@@ -265,6 +266,11 @@ if __name__ == '__main__':
         z_noise = args.init_noise_scale * torch.randn_like(z)  # [b*n, L, D]
         if not args.add_noise:
             z_noise[::n, ...] = 0  # make sure the first one is accurate
+        if args.bubble:
+            z_noise = z_noise.reshape(z.shape[0], -1)
+            radius = args.init_noise_scale * np.sqrt(z_noise.shape[1]*1.0)
+            z_noise = radius * F.normalize(z_noise, dim=1)
+            z_noise = z_noise.reshape(*z.shape)
         z = z + z_noise
 
         z.requires_grad = True

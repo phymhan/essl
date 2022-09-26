@@ -85,6 +85,7 @@ if __name__ == '__main__':
     parser.add_argument('--expert', action='store_true')
     parser.add_argument('--uint8', action='store_true')
     parser.add_argument('--which_model', type=str, default='simclr')
+    parser.add_argument('--bubble', action='store_true')
     args = parser.parse_args()
 
     utils.fix_seed(args.seed)
@@ -298,6 +299,11 @@ if __name__ == '__main__':
         z_noise = args.init_noise_scale * torch.randn_like(z)  # [b*n, L, D]
         if not args.add_noise:
             z_noise[::n, ...] = 0  # make sure the first one is accurate
+        if args.bubble:
+            z_noise = z_noise.reshape(z.shape[0], -1)
+            radius = args.init_noise_scale * np.sqrt(z_noise.shape[1]*1.0)
+            z_noise = radius * F.normalize(z_noise, dim=1)
+            z_noise = z_noise.reshape(*z.shape)
         z = z + z_noise
 
         z.requires_grad = True
